@@ -1,0 +1,482 @@
+# AI自動化開發控制器 Pro v5.5 - 系統架構與流程圖
+#建議使用py3.11.9
+## 📐 一、系統總體架構
+
+```mermaid
+graph TB
+    subgraph "前端層 (HTML/JavaScript)"
+        UI[用戶界面]
+        FileUpload[文件上傳<br/>拖放/選擇]
+        ProjectPanel[項目面板<br/>文件結構]
+        Monitor[監控界面<br/>程式狀態]
+    end
+    
+    subgraph "Flask路由層 (Python)"
+        R1[/run-process<br/>主執行流程]
+        R2[/capture-screenshots<br/>螢幕擷取]
+        R3[/api/config<br/>配置管理]
+        R4[/load-project<br/>項目載入]
+        R5[/running-programs<br/>程式監控]
+    end
+    
+    subgraph "核心引擎層"
+        PM[ProcessManager<br/>流程編排器]
+        GA[GeminiAI<br/>API管理器]
+        CM[ConversationManager<br/>對話歷史v5.5]
+        VSC[VSCodeController<br/>編輯器控制]
+        SC[ScreenCapture<br/>智能截圖]
+        PGM[ProgramManager<br/>程式執行管理]
+    end
+    
+    subgraph "數據持久層"
+        Conv[conversations/<br/>對話歷史JSON]
+        Proj[projects/<br/>專案元數據]
+        Screen[screenshots/<br/>截圖PNG]
+        Config[config.json<br/>用戶配置]
+    end
+    
+    subgraph "外部服務"
+        Gemini[Google Gemini API<br/>2.5 Pro/Flash]
+        VSCode[Visual Studio Code<br/>code CLI]
+        Browser[瀏覽器<br/>獨立APP模式]
+    end
+    
+    UI --> R1
+    FileUpload --> R1
+    Monitor --> R5
+    
+    R1 --> PM
+    R2 --> SC
+    R3 --> Config
+    R4 --> CM
+    R5 --> PGM
+    
+    PM --> GA
+    PM --> CM
+    PM --> VSC
+    PM --> PGM
+    
+    GA --> Gemini
+    VSC --> VSCode
+    PGM --> Browser
+    
+    CM --> Conv
+    SC --> Screen
+```
+
+## 🔄 二、主要執行流程 (/run-process)
+
+```mermaid
+flowchart TD
+    Start([用戶輸入需求])
+    
+    subgraph "第1階段：數據收集"
+        A1[收集輸入參數]
+        A2{是否迭代模式?}
+        A3[載入現有項目文件]
+        A4{附加截圖?}
+        A5[啟動主程式並等待]
+        A6[擷取視窗畫面]
+        A7{附加Terminal?}
+        A8[收集所有程式輸出]
+    end
+    
+    subgraph "第2階段：AI處理"
+        B1[構建Gemini請求]
+        B2[處理上傳文件]
+        B3[Base64編碼圖片/PDF]
+        B4[添加Terminal輸出]
+        B5[呼叫Gemini API]
+        B6[解析JSON回應]
+        B7[提取usage_metadata]
+    end
+    
+    subgraph "第3階段：代碼生成"
+        C1[解析ProjectOutput]
+        C2[提取多個FileOutput]
+        C3{是迭代?}
+        C4[終止舊程式]
+        C5[安裝依賴套件]
+        C6[創建/更新文件]
+    end
+    
+    subgraph "第4階段：執行與控制"
+        D1[啟動VS Code]
+        D2[自動打開文件]
+        D3{有主文件?}
+        D4{是Web應用?}
+        D5[啟動伺服器]
+        D6[開啟獨立瀏覽器]
+        D7[執行一般程式]
+    end
+    
+    subgraph "第5階段：監控與反饋"
+        E1[捕獲Terminal輸出]
+        E2[自動擷取視窗]
+        E3[保存對話歷史]
+        E4[更新項目列表]
+        E5[返回結果給前端]
+    end
+    
+    Start --> A1
+    A1 --> A2
+    A2 -->|是| A3
+    A2 -->|否| A7
+    A3 --> A4
+    A4 -->|是| A5
+    A4 -->|否| A7
+    A5 --> A6
+    A6 --> A7
+    A7 -->|是| A8
+    A7 -->|否| B1
+    A8 --> B1
+    
+    B1 --> B2
+    B2 --> B3
+    B3 --> B4
+    B4 --> B5
+    B5 --> B6
+    B6 --> B7
+    B7 --> C1
+    
+    C1 --> C2
+    C2 --> C3
+    C3 -->|是| C4
+    C3 -->|否| C5
+    C4 --> C5
+    C5 --> C6
+    C6 --> D1
+    
+    D1 --> D2
+    D2 --> D3
+    D3 -->|是| D4
+    D3 -->|否| E1
+    D4 -->|是| D5
+    D4 -->|否| D7
+    D5 --> D6
+    D6 --> E1
+    D7 --> E1
+    
+    E1 --> E2
+    E2 --> E3
+    E3 --> E4
+    E4 --> E5
+    E5 --> End([完成])
+```
+
+## 🗂️ 三、對話歷史管理 (v5.5核心改進)
+
+```mermaid
+flowchart LR
+    subgraph "ConversationManager v5.5"
+        A[load_conversation]
+        B[save_conversation]
+        C[add_message]
+    end
+    
+    subgraph "ConversationMessage結構"
+        M1[role: user/assistant]
+        M2[content: 文本內容]
+        M3[timestamp: ISO時間]
+        M4[files: 文件元數據]
+        M5[metadata: 額外信息]
+        M6[terminal_output: 終端輸出]
+        M7[usage_metadata: Token統計★]
+    end
+    
+    subgraph "存儲結構"
+        F1[conversations/conv_hash.json]
+        F2[project_dir的MD5作為文件名]
+        F3[包含完整對話陣列]
+        F4[每條消息都有usage_metadata]
+    end
+    
+    A --> M1
+    C --> M7
+    B --> F1
+    F1 --> F3
+    F3 --> F4
+    
+    style M7 fill:#90EE90
+    style F4 fill:#90EE90
+```
+
+## 🖼️ 四、智能截圖系統
+
+```mermaid
+flowchart TD
+    Start[觸發截圖請求]
+    
+    A1[獲取project_json]
+    A2[提取所有window_titles]
+    A3[提取所有web_titles]
+    A4[生成項目名稱變體]
+    
+    B1[枚舉所有視窗]
+    B2{匹配邏輯}
+    
+    C1[VS Code + 項目名]
+    C2[瀏覽器 + web_title]
+    C3[直接標題匹配]
+    C4[項目名稱變體匹配]
+    
+    D1[激活視窗]
+    D2[使用mss擷取]
+    D3[保存PNG文件]
+    D4[添加到結果列表]
+    
+    End[返回截圖列表]
+    
+    Start --> A1
+    A1 --> A2
+    A2 --> A3
+    A3 --> A4
+    A4 --> B1
+    B1 --> B2
+    
+    B2 --> C1
+    B2 --> C2
+    B2 --> C3
+    B2 --> C4
+    
+    C1 --> D1
+    C2 --> D1
+    C3 --> D1
+    C4 --> D1
+    
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D4 --> End
+```
+
+## ⚙️ 五、VS Code自動控制流程
+
+```mermaid
+sequenceDiagram
+    participant PM as ProcessManager
+    participant VSC as VSCodeController
+    participant OS as 作業系統
+    participant VSCode as VS Code實例
+    participant PyAuto as PyAutoGUI
+    
+    PM->>VSC: launch_and_open(folder, files)
+    VSC->>OS: subprocess.Popen(['code', folder, file1])
+    OS->>VSCode: 啟動VS Code
+    
+    loop 15秒超時檢測
+        VSC->>OS: pywinctl.getAllWindows()
+        OS-->>VSC: 視窗列表
+        VSC->>VSC: 搜尋匹配的VS Code視窗
+    end
+    
+    VSC->>VSCode: window.activate()
+    VSCode-->>VSC: 視窗已激活
+    
+    loop 打開額外文件
+        VSC->>PyAuto: hotkey('ctrl', 'p')
+        PyAuto->>VSCode: 觸發快捷鍵
+        VSC->>PyAuto: pyperclip.copy(filename)
+        VSC->>PyAuto: hotkey('ctrl', 'v')
+        VSC->>PyAuto: press('enter')
+        PyAuto->>VSCode: 文件已開啟
+    end
+    
+    VSC-->>PM: 返回成功結果
+```
+
+## 🚀 六、程式執行管理
+
+```mermaid
+stateDiagram-v2
+    [*] --> 待執行
+    
+    待執行 --> 檢查類型: run_file()
+    
+    檢查類型 --> Python程式: .py
+    檢查類型 --> Node程式: .js
+    檢查類型 --> HTML文件: .html
+    檢查類型 --> Web應用: is_web_app
+    
+    Python程式 --> 創建進程: subprocess.Popen
+    Node程式 --> 創建進程
+    
+    創建進程 --> 捕獲輸出: stdout pipe
+    捕獲輸出 --> 輸出隊列: queue.Queue
+    輸出隊列 --> 背景執行: 運行中
+    
+    Web應用 --> 啟動伺服器: 後端server
+    啟動伺服器 --> 開啟瀏覽器: 獨立視窗
+    開啟瀏覽器 --> 背景執行
+    
+    HTML文件 --> 直接瀏覽器: webbrowser.open
+    直接瀏覽器 --> [*]
+    
+    背景執行 --> 監控狀態: check_programs()
+    監控狀態 --> 背景執行: poll() == None
+    監控狀態 --> 已結束: poll() != None
+    
+    已結束 --> [*]
+```
+
+## 📊 七、數據流向圖
+
+```mermaid
+graph LR
+    subgraph "輸入數據"
+        I1[用戶指令]
+        I2[上傳文件]
+        I3[項目路徑]
+        I4[配置參數]
+    end
+    
+    subgraph "處理層"
+        P1[文件編碼]
+        P2[prompt構建]
+        P3[API調用]
+        P4[JSON解析]
+    end
+    
+    subgraph "輸出數據"
+        O1[項目文件]
+        O2[對話記錄]
+        O3[截圖文件]
+        O4[Token統計]
+        O5[Terminal輸出]
+    end
+    
+    I1 --> P2
+    I2 --> P1
+    I3 --> P2
+    I4 --> P3
+    
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    
+    P4 --> O1
+    P4 --> O2
+    P3 --> O4
+    O1 --> O5
+    
+    O2 -.保存.-> DB[(conversations/)]
+    O1 -.保存.-> FS[(projects/)]
+    O3 -.保存.-> IMG[(screenshots/)]
+```
+
+## 🔐 八、關鍵變量傳遞路徑
+
+| 變量 | 起點 | 傳遞路徑 | 終點 |
+|------|------|----------|------|
+| `folder_path` | 前端選擇 | Flask → ProcessManager → CodeProcessor | 文件系統 |
+| `prompt` | 用戶輸入 | Flask → ProcessManager → GeminiAI | API請求 |
+| `files[]` | 文件上傳 | Base64編碼 → GeminiAI | multimodal輸入 |
+| `usage_metadata` | Gemini響應 | response.usage_metadata → ConversationMessage | 對話歷史 |
+| `terminal_output` | subprocess.stdout | queue → ProgramManager → ConversationMessage | 前端顯示 |
+| `is_iteration` | 前端狀態 | Flask → ProcessManager | 決定執行模式 |
+| `project_dir` | 路徑計算 | 新建/迭代分支 | 最終項目位置 |
+
+## 🛠️ 九、關鍵技術實現
+
+### 9.1 文件處理管道
+
+```mermaid
+flowchart LR
+    A[文件上傳] --> B{文件類型}
+    B -->|圖片| C[Base64編碼]
+    B -->|PDF| D[Base64編碼]
+    B -->|文本| E[UTF-8讀取]
+    
+    C --> F[image/png<br/>MIME type]
+    D --> G[application/pdf<br/>MIME type]
+    E --> H[text/plain<br/>MIME type]
+    
+    F --> I[Gemini vision處理]
+    G --> J[Gemini PDF處理]
+    H --> K[Gemini text處理]
+    
+    I --> L[統一API調用]
+    J --> L
+    K --> L
+```
+
+### 9.2 Token統計機制 (v5.5核心)
+
+```python
+# 從Gemini響應提取
+if hasattr(response, 'usage_metadata'):
+    um = response.usage_metadata
+    usage_metadata = {
+        'prompt_token_count': um.prompt_token_count,
+        'candidates_token_count': um.candidates_token_count,
+        'thoughts_token_count': um.thoughts_token_count,
+        'total_token_count': um.total_token_count
+    }
+
+# 獨立保存到ConversationMessage
+ConversationManager.add_message(
+    project_dir,
+    'assistant',
+    content,
+    usage_metadata=usage_metadata  # ★ 獨立字段
+)
+```
+
+### 9.3 項目目錄管理邏輯
+
+```python
+# v5.5修復：確保路徑一致性
+if is_iteration:
+    final_project_dir = folder_path  # 迭代：使用現有路徑
+else:
+    final_project_dir = folder_path / project_name  # 新建：創建子目錄
+    
+    # 遷移對話記錄到新目錄
+    temp_conversation = ConversationManager.load_conversation(folder_path)
+    temp_conversation.project_dir = final_project_dir
+    ConversationManager.save_conversation(temp_conversation)
+    
+    # 清理臨時文件
+    temp_conv_file.unlink()
+```
+
+## ⚡ 十、性能優化要點
+
+1. **異步輸出捕獲**：使用threading + queue避免阻塞
+2. **智能視窗匹配**：多層匹配邏輯減少誤判
+3. **Base64流式處理**：避免大文件內存溢出
+4. **對話歷史壓縮**：只保留最近50行terminal輸出
+5. **瀏覽器進程追蹤**：獨立管理避免殘留進程
+
+## 🔄 十一、錯誤恢復機制
+
+```mermaid
+flowchart TD
+    A[執行失敗] --> B{錯誤類型}
+    
+    B -->|API錯誤| C[記錄原始響應]
+    B -->|JSON解析失敗| D[嘗試從Markdown提取]
+    B -->|文件操作失敗| E[檢查權限並重試]
+    B -->|程式崩潰| F[捕獲退出碼]
+    
+    C --> G[保存到對話歷史]
+    D --> G
+    E --> G
+    F --> G
+    
+    G --> H[前端顯示詳細錯誤]
+    H --> I[提供解決建議]
+```
+
+---
+
+## 📝 總結
+
+v5.5版本的核心改進：
+1. ✅ **修復Token統計消失**：usage_metadata作為獨立字段持久化
+2. ✅ **修復路徑不一致**：明確區分新建/迭代模式的目錄處理
+3. ✅ **清理臨時文件**：避免對話記錄污染
+4. ✅ **Terminal實時捕獲**：使用queue機制非阻塞讀取
+5. ✅ **智能截圖升級**：基於project_json的多層匹配邏輯
+
+系統現已實現完整的本地AI開發自動化工作流。

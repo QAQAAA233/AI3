@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 自動化開發控制器 Pro v5.5</title>
+    <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+    <!-- Loading Indicator - 最高優先級 -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <span id="loadingMessage">處理中...</span>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <button class="new-chat-btn" onclick="createNewProject()">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M5 12h14"/>
+                </svg>
+                <span>新增專案</span>
+            </button>
+            <button class="select-existing-btn" onclick="selectExistingFolder()">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                </svg>
+                <span>選擇現有資料夾</span>
+            </button>
+        </div>
+
+        <div class="current-project-display" id="currentProjectDisplay" style="display: none;">
+            <div class="current-project-title">當前專案</div>
+            <div class="current-project-name">
+                <span id="currentProjectName">未選擇</span>
+                <span class="project-mode-badge" id="projectModeBadge">新建</span>
+            </div>
+        </div>
+
+        <div class="projects-section">
+            <div class="section-title">最近專案</div>
+            <div id="projectsList"></div>
+        </div>
+
+        <div class="tools-section">
+            <button class="tool-btn" onclick="showSettingsModal()">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+                </svg>
+                <span>設定</span>
+            </button>
+            <button class="tool-btn" onclick="showMonitorModal()">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 3v18h18M7 16l4-4 4 4 6-6"/>
+                </svg>
+                <span>監控</span>
+            </button>
+            <button class="tool-btn" onclick="captureScreenshotsNow()">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                </svg>
+                <span>立即截圖</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content" id="mainContent">
+        <div class="header">
+            <div class="header-left">
+                <button class="icon-btn" onclick="toggleSidebar()" title="切換側邊欄">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="sidebarToggleIcon">
+                        <path d="M3 12h18M3 6h18M3 18h18"/>
+                    </svg>
+                </button>
+                <button class="model-selector" onclick="showSettingsModal()">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>
+                    </svg>
+                    <span id="currentModel">Gemini 2.5 Pro</span>
+                    <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M6 9l6 6 6-6"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="header-right">
+                <button class="icon-btn" onclick="resetToHome()" title="回到初始介面" id="homeBtn" style="display: none;">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+                        <path d="M9 22V12h6v10"/>
+                    </svg>
+                </button>
+                <button class="icon-btn" onclick="checkRunningPrograms()" title="檢查程式狀態">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="5 3 19 12 5 21 5 3"/>
+                    </svg>
+                </button>
+                <button class="icon-btn" onclick="showSettingsModal()" title="設定">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="content-area" id="contentArea">
+            <div class="project-panel" id="projectPanel">
+                <button class="project-panel-toggle" id="projectPanelToggle" onclick="toggleProjectPanel()">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                    </svg>
+                </button>
+                
+                <div class="project-panel-content" id="projectPanelContent">
+                    <div class="project-panel-header">
+                        <h3>專案架構</h3>
+                        <button class="close-panel-btn" onclick="toggleProjectPanel()">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M18 6L6 18M6 6l12 12"/>
+                            </svg>
+                        </button>
+                    </div>
+                    
+                    <div id="projectStructureSection" style="display: none;">
+                        <div class="panel-section-title">
+                            <span>專案檔案</span>
+                            <span id="projectFilesCount" class="count-badge">0</span>
+                        </div>
+                        <div id="projectFilesList" class="panel-file-list"></div>
+                    </div>
+                    
+                    <div id="attachedFilesSection" style="display: none;">
+                        <div class="panel-section-title">
+                            <span>附加檔案</span>
+                            <span id="attachedFilesCount" class="count-badge">0</span>
+                        </div>
+                        <div id="autoAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">現有專案檔案 (自動附加)</div>
+                            <div id="autoAttachedFilesList" class="panel-file-list compact"></div>
+                        </div>
+                        <div id="manualAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">手動附加檔案</div>
+                            <div id="attachedFilesList" class="panel-file-list"></div>
+                        </div>
+                    </div>
+
+                    <div id="panelEmptyState" class="panel-empty">
+                        <svg class="icon-large" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                        </svg>
+                        <div>選擇專案後顯示檔案結構</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="empty-state" id="emptyState">
+                <h1 class="empty-title">選擇或創建一個專案開始工作</h1>
+
+                <div class="suggestions-grid">
+                    <div class="suggestion-card" onclick="useSuggestion('創建一個待辦事項應用，使用 Flask 後端和現代化的前端界面')">
+                        <div class="suggestion-title">待辦事項應用</div>
+                        <div class="suggestion-desc">創建一個功能完整的待辦清單應用</div>
+                    </div>
+                    <div class="suggestion-card" onclick="useSuggestion('生成一個幾何藝術生成器，使用 Python 和 Tkinter')">
+                        <div class="suggestion-title">幾何藝術生成器</div>
+                        <div class="suggestion-desc">創建隨機幾何圖案的藝術程式</div>
+                    </div>
+                    <div class="suggestion-card" onclick="useSuggestion('開發一個簡單的聊天應用，支持多用戶即時通訊')">
+                        <div class="suggestion-title">即時聊天應用</div>
+                        <div class="suggestion-desc">使用 WebSocket 的聊天室</div>
+                    </div>
+                    <div class="suggestion-card" onclick="useSuggestion('創建一個資料視覺化儀表板，展示圖表和統計資料')">
+                        <div class="suggestion-title">資料儀表板</div>
+                        <div class="suggestion-desc">互動式資料分析和視覺化</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="conversation-layout" id="conversationLayout">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <div class="memory-panel" id="memoryPanel" style="display: none;">
+                    <div class="memory-panel-header">
+                        <div class="memory-title-group">
+                            <h3>記憶與評分</h3>
+                            <span class="memory-project-label" id="memoryProjectLabel">尚未選擇專案</span>
+                        </div>
+                        <div class="memory-header-actions">
+                            <span class="memory-score" id="memoryScoreDisplay">--</span>
+                            <button class="memory-collapse-btn" id="memoryCollapseBtn" onclick="toggleMemoryPanel()" aria-label="收合記憶面板" aria-expanded="true">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="9 6 15 12 9 18"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="memory-panel-body" id="memoryPanelBody">
+                        <section class="memory-section">
+                            <h4>品質評分</h4>
+                            <div class="memory-evaluation-list" id="memoryEvaluationList"></div>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案摘要</h4>
+                            <p class="memory-text" id="memorySummaryBox">尚未建立專案總結</p>
+                        </section>
+                        <section class="memory-section">
+                            <h4>短期記憶</h4>
+                            <ul class="memory-bullet-list" id="memorySTMList">
+                                <li class="memory-placeholder">尚未累積短期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>長期記憶</h4>
+                            <ul class="memory-bullet-list" id="memoryLTMList">
+                                <li class="memory-placeholder">尚未建立長期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案目標</h4>
+                            <div class="memory-goals-list" id="memoryGoalsList"></div>
+                        </section>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-container">
+                <!-- 檔案預覽區域 -->
+                <div class="files-preview-area" id="filesPreviewArea">
+                    <div class="preview-files-list" id="previewFilesList"></div>
+                </div>
+
+                <div class="input-wrapper">
+                    <div class="input-actions-left">
+                        <button class="attach-btn" onclick="togglePlusMenu()" title="更多選項" id="plusMenuBtn">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                        </button>
+                        <div class="plus-menu" id="plusMenu">
+                            <div class="menu-item" onclick="triggerFileInput()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+                                </svg>
+                                <span>上傳檔案</span>
+                            </div>
+                            <div class="menu-item" id="screenshotMenuItem" onclick="toggleAutoScreenshot()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+                                    <circle cx="12" cy="13" r="4"/>
+                                </svg>
+                                <span>自動截圖(迭代時)</span>
+                            </div>
+                            <div class="menu-item" id="terminalMenuItem" onclick="toggleAttachTerminal()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="4 17 10 11 4 5"/>
+                                    <line x1="12" y1="19" x2="20" y2="19"/>
+                                </svg>
+                                <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="diagnosticsMenuItem" onclick="toggleAttachDiagnostics()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 9l6 6M15 9l-6 6"/>
+                                    <path d="M19 3H5a2 2 0 00-2 2v14l4-4h12a2 2 0 002-2V5a2 2 0 00-2-2z"/>
+                                </svg>
+                                <span>附加語法偵錯結果</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAutoAttachMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20l9-5-9-5-9 5 9 5z"/>
+                                    <path d="M3 10l9-5 9 5"/>
+                                </svg>
+                                <span>自動附加記憶上下文</span>
+                            </div>
+                            <div class="menu-hint" id="memorySuggestionPreview">上一輪改進建議：尚未有資料</div>
+                            <div class="menu-divider"></div>
+                            <div class="menu-item" onclick="showAdvancedSettings()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                    <path d="M9 3v18"/>
+                                </svg>
+                                <span>進階設定</span>
+                            </div>
+                        </div>
+                        <input type="file" id="fileInput" multiple accept="image/*,.pdf,.txt,.md,.json,.xml,.csv">
+                    </div>
+                    <textarea 
+                        class="main-input" 
+                        id="mainInput" 
+                        placeholder="輸入您的需求..." 
+                        rows="1"
+                        oninput="autoResize(this); updateSubmitButton()"
+                        onkeydown="handleKeyDown(event)"
+                    ></textarea>
+                    <button class="submit-btn" id="submitBtn" onclick="handleSubmit()">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h2 class="modal-title">設定</h2>
+                <button class="close-btn" onclick="closeModal('settingsModal')">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('basicTab')">基本設定</button>
+                <button class="tab" onclick="switchTab('advancedTab')">進階參數</button>
+                <button class="tab" onclick="switchTab('safetyTab')">安全設定</button>
+            </div>
+
+            <!-- Basic Tab -->
+            <div class="tab-content active" id="basicTab">
+                <div class="form-group">
+                    <label class="form-label">Gemini API Key</label>
+                    <div class="password-input-group">
+                        <input type="password" class="form-input" id="apiKey" placeholder="輸入您的 API Key...">
+                        <button class="toggle-password-btn" onclick="togglePasswordVisibility('apiKey')" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="apiKeyToggleIcon">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">AI 模型</label>
+                    <select class="form-select" id="modelName" onchange="updateModelLimits()">
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">提示詞模式</label>
+                    <select class="form-select" id="promptMode">
+                        <option value="default">預設模式 (穩健執行)</option>
+                        <option value="creative">創意模式 (探索新功能)</option>
+                    </select>
+                    <div class="form-hint">預設模式優先確保需求完整與品質穩定；創意模式會額外鼓勵提出突破性的功能構想。</div>
+                </div>
+
+                <div class="info-box">
+                    <strong id="modelInfoTitle">Gemini 2.5 Pro</strong><br>
+                    <span id="modelInfoText">輸入上限: 1,048,576 tokens | 輸出上限: 65,535 tokens</span>
+                </div>
+            </div>
+
+            <!-- Advanced Tab -->
+            <div class="tab-content" id="advancedTab">
+                <div class="form-group">
+                    <label class="form-label">思考預算 (Thinking Budget)</label>
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span class="slider-label">Token 預算</span>
+                            <span class="slider-value" id="thinkingBudgetValue">動態 (-1)</span>
+                        </div>
+                        <input type="range" class="slider" id="thinkingBudget" min="-1" max="32768" value="-1" step="1" oninput="updateSliderValue('thinkingBudget')">
+                    </div>
+                    <div class="slider-hint">
+                        -1: 動態思考 | 0: 關閉 | >0: 固定預算
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">溫度 (Temperature)</label>
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span class="slider-label">控制輸出的隨機性</span>
+                            <span class="slider-value" id="temperatureValue">0.7</span>
+                        </div>
+                        <input type="range" class="slider" id="temperature" min="0" max="2" value="0.7" step="0.1" oninput="updateSliderValue('temperature')">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Top-P</label>
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span class="slider-label">核心採樣</span>
+                            <span class="slider-value" id="topPValue">0.95</span>
+                        </div>
+                        <input type="range" class="slider" id="topP" min="0" max="1" value="0.95" step="0.01" oninput="updateSliderValue('topP')">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Top-K</label>
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span class="slider-label">候選詞彙數量</span>
+                            <span class="slider-value" id="topKValue">64</span>
+                        </div>
+                        <input type="range" class="slider" id="topK" min="1" max="100" value="64" step="1" oninput="updateSliderValue('topK')">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">最大輸出 Tokens</label>
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span class="slider-label">輸出長度限制</span>
+                            <span class="slider-value" id="maxOutputTokensValue">8192</span>
+                        </div>
+                        <input type="range" class="slider" id="maxOutputTokens" min="256" max="65535" value="8192" step="1" oninput="updateSliderValue('maxOutputTokens')">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Safety Tab -->
+            <div class="tab-content" id="safetyTab">
+                <div class="form-group">
+                    <label class="form-label">Harassment (騷擾)</label>
+                    <select class="form-select" id="safetyHarassment">
+                        <option value="BLOCK_NONE">不阻擋</option>
+                        <option value="BLOCK_ONLY_HIGH">僅阻擋高風險</option>
+                        <option value="BLOCK_MEDIUM_AND_ABOVE" selected>阻擋中等以上</option>
+                        <option value="BLOCK_LOW_AND_ABOVE">阻擋低等以上</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Hate Speech (仇恨言論)</label>
+                    <select class="form-select" id="safetyHateSpeech">
+                        <option value="BLOCK_NONE">不阻擋</option>
+                        <option value="BLOCK_ONLY_HIGH">僅阻擋高風險</option>
+                        <option value="BLOCK_MEDIUM_AND_ABOVE" selected>阻擋中等以上</option>
+                        <option value="BLOCK_LOW_AND_ABOVE">阻擋低等以上</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Sexually Explicit (色情內容)</label>
+                    <select class="form-select" id="safetySexuallyExplicit">
+                        <option value="BLOCK_NONE">不阻擋</option>
+                        <option value="BLOCK_ONLY_HIGH">僅阻擋高風險</option>
+                        <option value="BLOCK_MEDIUM_AND_ABOVE" selected>阻擋中等以上</option>
+                        <option value="BLOCK_LOW_AND_ABOVE">阻擋低等以上</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Dangerous Content (危險內容)</label>
+                    <select class="form-select" id="safetyDangerousContent">
+                        <option value="BLOCK_NONE">不阻擋</option>
+                        <option value="BLOCK_ONLY_HIGH">僅阻擋高風險</option>
+                        <option value="BLOCK_MEDIUM_AND_ABOVE" selected>阻擋中等以上</option>
+                        <option value="BLOCK_LOW_AND_ABOVE">阻擋低等以上</option>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn-primary" onclick="saveSettings()">
+                儲存設定
+            </button>
+        </div>
+    </div>
+
+    <!-- Monitor Modal -->
+    <div class="modal-overlay" id="monitorModal">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header">
+                <h2 class="modal-title">執行監控</h2>
+                <button class="close-btn" onclick="closeModal('monitorModal')">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">運行中的程式</label>
+                <div id="runningPrograms" class="programs-container">
+                    <div class="empty-programs">暫無運行中的程式</div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">螢幕截圖</label>
+                <div class="screenshot-grid" id="screenshotPreview"></div>
+            </div>
+
+            <button class="btn-secondary" onclick="delayedCaptureScreenshots()">
+                延遲 5 秒後擷取
+            </button>
+        </div>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>

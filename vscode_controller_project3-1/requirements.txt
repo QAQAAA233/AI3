@@ -1,0 +1,15 @@
+Flask
+pywebview
+pywinctl
+PyAutoGUI
+pyperclip
+mss
+Pillow
+google-generativeai
+python-dotenv
+google-auth
+colorlog
+PyPDF2
+python-docx
+openpyxl
+
