@@ -26,7 +26,7 @@
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
     
-    /* 新增：統一高度計算變量 */
+    /* 統一高度計算變量 */
     --header-height: 61px;
     --input-area-height: 120px;
     --memory-panel-top: 80px;
@@ -397,7 +397,6 @@ body {
     display: flex;
     flex-direction: column;
     padding: 6px;
-    /* 移除 align-items: center，改用內部元素控制對齊 */
 }
 
 /* 修復 1：empty-state 獨立置中 */
@@ -409,7 +408,7 @@ body {
     align-items: center;
     justify-content: center;
     min-height: 60vh;
-    /* 關鍵修復：當側邊欄收起時自動置中 */
+    /* 關鍵修復：初始介面完全置中，不留記憶面板空間 */
     margin: 0 auto;
 }
 
@@ -875,24 +874,25 @@ body {
 }
 
 /* =================================== */
-/* 對話與記憶佈局 - 修復版 */
+/* 對話與記憶佈局 - 關鍵修復 */
 /* =================================== */
 .conversation-layout {
     display: flex;
     gap: 20px;
     width: 100%;
-    align-items: flex-start; /* 修復：改為 flex-start */
-    padding: 0; /* 移除內邊距，交給子元素處理 */
+    align-items: flex-start;
+    padding: 20px;
 }
 
-/* 修復 2：results-container 不強制置中 */
+/* 修復 2：results-container 不強制置中，靈活寬度 */
 .results-container {
     flex: 1;
-    max-width: 1000px;
     width: 100%;
     margin: 0;
-    padding: 20px;
-    min-height: calc(100vh - var(--header-height) - var(--input-area-height) - 40px);
+    padding: 0;
+    /* 關鍵修復：右側留出記憶面板的空間 */
+    padding-right: 360px;
+    min-height: calc(100vh - var(--header-height) - var(--input-area-height) - 80px);
 }
 
 .results-placeholder {
@@ -907,15 +907,12 @@ body {
     line-height: 1.6;
 }
 
+/* 當記憶面板收合時的佈局調整 */
 .conversation-layout.memory-panel-collapsed .results-container {
-    max-width: 100%;
+    padding-right: 92px;
 }
 
-.conversation-layout.memory-panel-collapsed .memory-panel {
-    margin-left: auto;
-}
-
-/* 修復 3：記憶面板統一高度 */
+/* 修復 3：記憶面板統一高度與位置 - 與檔案按鈕垂直對齊 */
 .memory-panel {
     width: 320px;
     min-width: 320px;
@@ -925,14 +922,17 @@ body {
     box-shadow: var(--shadow-sm);
     display: flex;
     flex-direction: column;
-    position: sticky;
-    top: var(--memory-panel-top);
-    /* 關鍵修復：統一計算最大高度 */
-    max-height: calc(100vh - var(--memory-panel-top) - var(--input-area-height) - 40px);
+    /* 關鍵修復：使用 fixed 定位，與檔案按鈕垂直對齊 */
+    position: fixed;
+    right: 24px;
+    top: 140px;
+    /* 計算最大高度：視窗高度 - top 位置 - 底部間距 */
+    max-height: calc(100vh - 160px);
     overflow: hidden;
     transition: box-shadow 0.2s ease, border-color 0.2s ease, width 0.3s ease, min-width 0.3s ease;
-    margin-left: auto;
-    align-self: flex-start; /* 確保對齊頂部 */
+    flex-shrink: 0;
+    /* 確保不被專案面板遮擋 */
+    z-index: 600;
 }
 
 .memory-panel.collapsed {
@@ -950,7 +950,7 @@ body {
     border-bottom: 1px solid var(--border-light);
     background: var(--bg-primary);
     gap: 12px;
-    flex-shrink: 0; /* 防止頭部被壓縮 */
+    flex-shrink: 0;
 }
 
 .memory-title-group h3 {
@@ -986,7 +986,7 @@ body {
     justify-content: center;
     cursor: pointer;
     transition: all 0.2s ease;
-    flex-shrink: 0; /* 防止按鈕被壓縮 */
+    flex-shrink: 0;
 }
 
 .memory-collapse-btn:hover {
@@ -1013,23 +1013,23 @@ body {
 .memory-panel-body {
     padding: 16px 20px 20px 20px;
     overflow-y: auto;
-    overflow-x: hidden; /* 防止水平滾動 */
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: 16px;
     transition: opacity 0.3s ease;
-    flex: 1; /* 佔據剩餘空間 */
+    flex: 1;
 }
 
 .memory-panel.collapsed .memory-panel-body {
     opacity: 0;
     pointer-events: none;
     padding: 0;
-    display: none; /* 完全隱藏，避免佔用空間 */
+    display: none;
 }
 
 .memory-section {
-    flex-shrink: 0; /* 防止區塊被壓縮 */
+    flex-shrink: 0;
 }
 
 .memory-section h4 {
@@ -1153,13 +1153,22 @@ body {
 @media (max-width: 1200px) {
     .conversation-layout {
         flex-direction: column;
+        padding: 10px;
+    }
+
+    .results-container {
+        padding-right: 0;
+    }
+
+    .empty-state {
+        padding-right: 0;
     }
 
     .memory-panel {
         position: static;
         width: 100%;
         max-width: 100%;
-        max-height: 600px; /* 移動端固定高度 */
+        max-height: 600px;
     }
 }
 
@@ -1846,6 +1855,28 @@ input[type="file"] {
 /* =================================== */
 /* 響應式設計 */
 /* =================================== */
+@media (max-width: 1200px) {
+    .conversation-layout {
+        flex-direction: column;
+        padding: 10px;
+    }
+
+    .results-container {
+        padding-right: 0;
+    }
+
+    .empty-state {
+        padding-right: 0;
+    }
+
+    .memory-panel {
+        position: static;
+        width: 100%;
+        max-width: 100%;
+        max-height: 600px;
+    }
+}
+
 @media (max-width: 768px) {
     .sidebar {
         width: 100%;
@@ -1866,6 +1897,7 @@ input[type="file"] {
     
     .empty-state {
         padding: 20px;
+        padding-right: 0;
     }
     
     .suggestions-grid {
