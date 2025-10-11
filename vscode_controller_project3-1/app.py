@@ -18,6 +18,7 @@ import shutil
 import platform
 import logging
 import queue
+import tempfile
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -111,7 +112,7 @@ class FileOutput:
     """單個檔案輸出結構"""
     filename: str
     filetype: str
-    code: str
+    code: Optional[str] = None
     opens_window: bool = False
     window_title: Optional[str] = None
     install_requirements: Optional[List[str]] = None
@@ -123,6 +124,10 @@ class FileOutput:
     server_address: Optional[str] = None
     web_title: Optional[str] = None
     file_operation: Optional[str] = None
+    diff_mode: bool = False
+    diff_format: Optional[str] = None
+    unified_diff: Optional[str] = None
+    diff_metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class ProjectOutput:
@@ -133,6 +138,8 @@ class ProjectOutput:
     main_file: Optional[str] = None
     setup_instructions: Optional[List[str]] = None
     run_instructions: Optional[List[str]] = None
+    modification_mode: Optional[str] = None
+    modification_plan: Optional[Dict[str, Any]] = None
 
 @dataclass
 class AIConfig:
@@ -213,6 +220,7 @@ class ProcessResult:
     output: str = ""
     files_created: List[str] = field(default_factory=list)
     files_updated: List[str] = field(default_factory=list)
+    files_deleted: List[str] = field(default_factory=list)
     project_data: Optional[ProjectOutput] = None
     ai_response: str = ""
     ai_response_json: Optional[Dict] = None
@@ -295,6 +303,17 @@ def get_json_schema():
                     "main_file": {"type": "string", "description": "主要執行檔名(需與 files 中對應存在)"},
                     "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "可逐條執行的環境設置：套件安裝、環境變數、權限/健康檢查、平台相容性注意事項。"},
                     "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "啟動/測試指令(本機/容器/埠號)；若含UI，提供路徑與最低可操作流程。"},
+                    "modification_mode": {"type": ["string", "null"], "description": "本輪修改模式，例如 diff/overwrite。"},
+                    "modification_plan": {
+                        "type": ["object", "null"],
+                        "description": "對此次修改的摘要、風險與回退策略說明。",
+                        "properties": {
+                            "summary": {"type": "string", "description": "修改項目概述"},
+                            "change_rationale": {"type": "string", "description": "修改原因"},
+                            "risk_assessment": {"type": "string", "description": "風險評估"},
+                            "rollback_strategy": {"type": "string", "description": "回退策略"}
+                        }
+                    },
                     "files": {
                         "type": "array",
                         "items": {
@@ -306,7 +325,7 @@ def get_json_schema():
                                     "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
                                     "description": "檔案語言/型別"
                                 },
-                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；嚴禁使用省略號。"},
+                                "code": {"type": ["string", "null"], "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；若使用 diff_mode=true 修改既有檔案則填 null。"},
                                 "opens_window": {"type": "boolean", "description": "是否會開啟原生視窗或GUI"},
                                 "window_title": {"type": ["string", "null"], "description": "視窗標題(若有視窗則填)"},
                                 "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝項(如 pip install package)；須與 dependencies 對齊。"},
@@ -316,7 +335,12 @@ def get_json_schema():
                                 "is_web_app": {"type": "boolean", "description": "是否為Web應用(HTTP伺服/前端)"},
                                 "can_open_standalone": {"type": "boolean", "description": "是否能自動開啟獨立瀏覽器視窗"},
                                 "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
-                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"}
+                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"},
+                                "file_operation": {"type": ["string", "null"], "description": "文件操作類型：create/modify/delete/rename/overwrite；省略時系統會自動推斷。"},
+                                "diff_mode": {"type": "boolean", "description": "是否採用 Diff 模式增量更新既有檔案"},
+                                "diff_format": {"type": ["string", "null"], "description": "Diff 格式(建議 unified)"},
+                                "unified_diff": {"type": ["string", "null"], "description": "統一格式 Diff 內容，需包含 ---/+++/@@ 區段"},
+                                "diff_metadata": {"type": ["object", "null"], "description": "Diff 附加資訊(如 original_file_hash、context_lines、hunks_count、estimated_changes)"}
                             },
                             "required": ["filename", "filetype", "code", "opens_window"]
                         }
@@ -358,11 +382,23 @@ JSON 結構必須包含以下欄位:
       "main_file":"主要程式檔案名稱",
       "setup_instructions":["pip install ...", "..."],
       "run_instructions":["python main.py", "..."],
+      "modification_mode":"diff/overwrite/...",
+      "modification_plan":{
+          "summary":"修改項目概述",
+          "change_rationale":"修改原因",
+          "risk_assessment":"風險評估",
+          "rollback_strategy":"回退策略"
+      },
       "files":[
           {
               "filename":"檔名.副檔名",
               "filetype":"python/javascript/...",
-              "code":"完整可執行程式；繁中註解；不得省略",
+              "code":"完整可執行程式；diff_mode=true 時為 null",
+              "file_operation":"create/modify/delete/rename/overwrite",
+              "diff_mode":true/false,
+              "diff_format":"unified",
+              "unified_diff":"--- a/file\n+++ b/file\n@@ ...",
+              "diff_metadata":{"context_lines":3,"hunks_count":2,"estimated_changes":{"additions":5,"deletions":3}},
               "opens_window":true/false,
               "window_title":null或字串,
               "install_requirements":["pip install ..."],
@@ -382,10 +418,60 @@ JSON 結構必須包含以下欄位:
 1) 僅輸出有效 JSON；不得加入 Markdown/註解/多餘文字。
 2) 內部思考採『Least-to-Most→Self-Consistency→ToT/GoT(視需)→ReAct(檢索/工具)→PoT/PAL(把運算交給程式)→CoVe/測試驗證→收斂』之流程；必要時多方案比較後收斂單一路徑。
 3) 安全與隱私：禁止外露中間推理/工具軌跡；僅呈現可驗證結論與程式；第三方素材須標明授權假設或以自製替代。
-4) 可執行性優先：`files[].code` 為可跑版本；避免除錯模式；Flask 以 `app.run(host='0.0.0.0', port=5000)`；命令/路徑/埠需一致。
+4) 可執行性優先：`files[].code` 在 create/overwrite 時需為可跑版本；若以 diff 模式修改既有檔案則提供正確 `unified_diff`；Flask 以 `app.run(host='0.0.0.0', port=5000)`；命令/路徑/埠需一致。
 5) 結構自檢：輸出前內隱檢核鍵名/必填/enum/型別/可解析性/依賴一致/命令可跑；若不符先內部修正。必要時於推斷階段啟用結構化/受限解碼以保證JSON合法。
 6) 使用者介面：若含UI，先內隱評估流程/回饋/響應式/可近用性；必要時加入輕量狀態提示與錯誤訊息。
 7) 評分/扣分/建議須緊扣本輪輸出與自檢結果，避免空話。"""
+
+    diff_instruction = """【代碼修改模式說明】
+當專案中已存在文件需要修改時，你應該優先使用 Unified Diff 格式而非完整重寫：
+
+1. **何時使用 Diff 模式**：
+   - 既有檔案僅需局部修改（約少於 30% 內容）
+   - 使用者描述為「修改/優化/修復」既有程式碼
+   - 檔案較大或需保留未改動區塊
+
+2. **Diff 格式規範**：
+   - 僅使用標準 Unified Diff（含 `---`、`+++`、`@@` 標頭）
+   - 提供 3-5 行上下文方便定位
+   - 依功能拆分 hunk，避免一次覆蓋無關程式碼
+
+3. **Diff 生成最佳實踐**：
+   - ✅ 範例：
+     ```diff
+     @@ -10,7 +10,8 @@ def process_data(data):
+          if not data:
+              return None
+     -    result = data * 2
+     +    # 添加驗證邏輯
+     +    result = validate(data) * 2
+          return result
+     ```
+   - ❌ 禁止：缺少上下文、未使用標準語法、一次改動過多行
+
+4. **文件操作判斷**：
+   ```
+   IF 檔案不存在 → file_operation = "create"
+   ELSE IF 局部修改 → file_operation = "modify", diff_mode = true
+   ELSE IF 完全取代 → file_operation = "overwrite"
+   ELSE IF 刪除檔案 → file_operation = "delete"
+   ```
+
+5. **內部自檢清單**：
+   - hunk 是否提供足夠上下文（≥3 行）
+   - Diff 語法是否正確
+   - 修改是否完整覆蓋相關程式邏輯
+   - 是否同步更新測試或相依檔案
+   - description 是否說明修改原因
+
+6. **禁止事項**：
+   - 禁止在 diff 中混入非標準語法或行號標註
+   - 禁止生成超過 50 行的巨大 hunk（應拆分）
+   - 禁止產生未跳脫的特殊字元造成 JSON 解析失敗
+
+【自動修復機制】
+若收到 Patch 應用失敗回報，應分析原因（上下文不符、縮排差異等），調整 diff（增加上下文、修正縮排或改為 overwrite），並於 description 中說明對策。
+"""
 
     if normalized_mode == "creative":
         mode_instruction = """【模式：創意模式】
@@ -400,6 +486,7 @@ JSON 結構必須包含以下欄位:
 
     return "\n".join([
         base_instruction,
+        diff_instruction,
         mode_instruction,
         "請嚴格依此最新模板回覆，避免外露推理，且不得遺漏任何欄位。" + custom_block
     ])
@@ -1690,6 +1777,169 @@ class ScreenCapture:
         return screenshots
 
 # ============================================
+# Diff 處理工具
+# ============================================
+
+
+class DiffApplyError(Exception):
+    """套用 Unified Diff 時發生錯誤"""
+
+
+@dataclass
+class DiffHunk:
+    """單一 Diff hunk"""
+    old_start: int
+    old_length: int
+    new_start: int
+    new_length: int
+    lines: List[Tuple[str, str]] = field(default_factory=list)
+
+
+def detect_line_ending(text: str) -> str:
+    """判斷原始檔案換行符號"""
+
+    if "\r\n" in text:
+        return "\r\n"
+    if "\r" in text:
+        return "\r"
+    return "\n"
+
+
+def _normalize_line_for_compare(line: str) -> str:
+    """用於寬鬆比對的行正規化"""
+
+    return re.sub(r"\s+", " ", line.strip())
+
+
+def parse_unified_diff(diff_text: str) -> List[DiffHunk]:
+    """將 Unified Diff 文字解析為 DiffHunk 清單"""
+
+    hunks: List[DiffHunk] = []
+    current_hunk: Optional[DiffHunk] = None
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith('---') or raw_line.startswith('+++'):
+            continue
+
+        if raw_line.startswith('@@'):
+            match = re.match(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_len>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_len>\d+))? @@", raw_line)
+            if not match:
+                raise DiffApplyError(f"無法解析 hunk 標頭: {raw_line}")
+
+            current_hunk = DiffHunk(
+                old_start=int(match.group('old_start')),
+                old_length=int(match.group('old_len') or 1),
+                new_start=int(match.group('new_start')),
+                new_length=int(match.group('new_len') or 1)
+            )
+            hunks.append(current_hunk)
+            continue
+
+        if current_hunk is None:
+            continue
+
+        if not raw_line:
+            current_hunk.lines.append((' ', ''))
+            continue
+
+        prefix = raw_line[0]
+        content = raw_line[1:]
+
+        if prefix in {' ', '+', '-'}:
+            current_hunk.lines.append((prefix, content))
+        elif raw_line.startswith('\\'):
+            current_hunk.lines.append(('\\', raw_line[1:].strip()))
+        else:
+            raise DiffApplyError(f"不支援的 Diff 行: {raw_line}")
+
+    return hunks
+
+
+def apply_unified_diff(original_content: str, diff_text: str, *, strict: bool = True) -> str:
+    """將 Unified Diff 套用到原始內容"""
+
+    hunks = parse_unified_diff(diff_text)
+    original_lines = original_content.splitlines(keepends=True)
+    newline = detect_line_ending(original_content) if original_content else "\n"
+
+    result_lines: List[str] = []
+    src_index = 0
+
+    def lines_match(expected: str, actual: str) -> bool:
+        if strict:
+            return expected == actual
+        return _normalize_line_for_compare(expected) == _normalize_line_for_compare(actual)
+
+    for hunk in hunks:
+        target_index = max(hunk.old_start - 1, 0)
+        if target_index < src_index:
+            raise DiffApplyError("Diff hunk 順序錯誤或重疊")
+
+        result_lines.extend(original_lines[src_index:target_index])
+        src_index = target_index
+
+        last_added_index: Optional[int] = None
+
+        for tag, text in hunk.lines:
+            if tag == ' ':
+                if src_index >= len(original_lines):
+                    raise DiffApplyError("Diff 上下文超出原始檔案長度")
+
+                original_line = original_lines[src_index]
+                comparison = original_line.rstrip('\r\n')
+                if not lines_match(text, comparison):
+                    raise DiffApplyError("Diff 上下文與原檔不匹配")
+
+                result_lines.append(original_line)
+                src_index += 1
+                last_added_index = len(result_lines) - 1
+            elif tag == '-':
+                if src_index >= len(original_lines):
+                    raise DiffApplyError("Diff 刪除操作超出原始檔案範圍")
+
+                original_line = original_lines[src_index]
+                comparison = original_line.rstrip('\r\n')
+                if not lines_match(text, comparison):
+                    raise DiffApplyError("Diff 刪除內容與原檔不匹配")
+
+                src_index += 1
+            elif tag == '+':
+                new_line = text + ("" if text.endswith('\n') or text.endswith('\r') else newline)
+                result_lines.append(new_line)
+                last_added_index = len(result_lines) - 1
+            elif tag == '\\':
+                if text.startswith('No newline at end of file') and last_added_index is not None:
+                    result_lines[last_added_index] = result_lines[last_added_index].rstrip('\r\n')
+                continue
+            else:
+                raise DiffApplyError(f"未知的 Diff 標記: {tag}")
+
+    result_lines.extend(original_lines[src_index:])
+    return ''.join(result_lines)
+
+
+def apply_unified_diff_with_fallback(original_content: str, diff_text: str) -> str:
+    """先嚴格比對，失敗時嘗試忽略空白差異"""
+
+    try:
+        return apply_unified_diff(original_content, diff_text, strict=True)
+    except DiffApplyError as strict_error:
+        logger.warning(f"嚴格模式套用 Diff 失敗: {strict_error}. 嘗試寬鬆模式。")
+        return apply_unified_diff(original_content, diff_text, strict=False)
+
+
+def atomic_write(path: Path, content: str, encoding: str = 'utf-8') -> None:
+    """以原子方式寫入檔案，避免部分寫入造成損壞"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile('w', delete=False, encoding=encoding, dir=str(path.parent)) as tmp:
+        tmp.write(content)
+        temp_name = tmp.name
+
+    os.replace(temp_name, path)
+
+
+# ============================================
 # 程式碼處理模塊
 # ============================================
 
@@ -1703,10 +1953,14 @@ class CodeProcessor:
             project_section = json_data.get('專案輸出', json_data)
             files = []
             for file_data in project_section.get('files', []):
-                code = file_data.get('code', '')
+                code = file_data.get('code')
+                unified_diff = file_data.get('unified_diff')
 
                 if isinstance(code, str):
                     code = normalize_code_content(code)
+
+                if isinstance(unified_diff, str):
+                    unified_diff = normalize_code_content(unified_diff)
 
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
@@ -1721,7 +1975,12 @@ class CodeProcessor:
                     is_web_app=file_data.get('is_web_app', False),
                     can_open_standalone=file_data.get('can_open_standalone', False),
                     server_address=file_data.get('server_address'),
-                    web_title=file_data.get('web_title')
+                    web_title=file_data.get('web_title'),
+                    file_operation=file_data.get('file_operation'),
+                    diff_mode=bool(file_data.get('diff_mode', False)),
+                    diff_format=file_data.get('diff_format'),
+                    unified_diff=unified_diff,
+                    diff_metadata=file_data.get('diff_metadata')
                 ))
 
             return ProjectOutput(
@@ -1730,7 +1989,9 @@ class CodeProcessor:
                 files=files,
                 main_file=project_section.get('main_file'),
                 setup_instructions=project_section.get('setup_instructions'),
-                run_instructions=project_section.get('run_instructions')
+                run_instructions=project_section.get('run_instructions'),
+                modification_mode=project_section.get('modification_mode'),
+                modification_plan=project_section.get('modification_plan')
             )
 
         except Exception as e:
@@ -1778,54 +2039,90 @@ class CodeProcessor:
         return logs
     
     @staticmethod
-    def save_project_files(folder_path: str, project: ProjectOutput, is_iteration: bool = False) -> Tuple[List[str], List[str]]:
-        """儲存專案檔案(支持迭代更新)"""
-        saved_files = []
-        updated_files = []
+    def save_project_files(folder_path: str, project: ProjectOutput, is_iteration: bool = False) -> Tuple[List[str], List[str], List[str]]:
+        """儲存專案檔案(支持迭代更新與 Unified Diff)"""
+
+        saved_files: List[str] = []
+        updated_files: List[str] = []
+        deleted_files: List[str] = []
+
         project_dir = Path(folder_path)
-        
+
         if not is_iteration:
             project_dir = project_dir / project.project_name
-        
+
         project_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for file in project.files:
             filepath = project_dir / file.filename
-            
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
-            try:
-                file_exists = filepath.exists()
-                
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(file.code)
-                
+
+            operation = file.file_operation or ("modify" if file.diff_mode else None)
+            if operation is None:
+                operation = "create" if not filepath.exists() else "overwrite"
+
+            operation = operation.lower()
+            file_exists = filepath.exists()
+
+            if operation == "delete":
                 if file_exists:
-                    logger.info(f"已更新檔案: {filepath}")
-                    updated_files.append(str(filepath))
+                    filepath.unlink()
+                    deleted_files.append(str(filepath))
+                    logger.info(f"已刪除檔案: {filepath}")
                 else:
-                    logger.info(f"已建立檔案: {filepath}")
-                    saved_files.append(str(filepath))
-                
-            except IOError as e:
-                logger.error(f"儲存檔案失敗 {filepath}: {e}")
-                raise
-        
+                    logger.warning(f"嘗試刪除不存在的檔案: {filepath}")
+                continue
+
+            if file.diff_mode and file.unified_diff:
+                if not file_exists:
+                    raise DiffApplyError(f"無法套用 Diff，檔案不存在: {filepath}")
+
+                try:
+                    original_content = filepath.read_text(encoding='utf-8')
+                    patched_content = apply_unified_diff_with_fallback(original_content, file.unified_diff)
+                    atomic_write(filepath, patched_content)
+                    updated_files.append(str(filepath))
+                    logger.info(f"已套用 Diff 更新檔案: {filepath}")
+                except DiffApplyError as diff_error:
+                    logger.error(f"套用 Diff 失敗: {filepath} - {diff_error}")
+                    raise
+                continue
+
+            if operation == "rename":
+                logger.error("目前不支援 rename 操作，請改用 create/delete 或提供 unified_diff。")
+                raise ValueError("不支援的 file_operation: rename")
+
+            if file.code is None:
+                raise ValueError(f"檔案 {file.filename} 缺少 code 內容，無法進行 {operation} 操作")
+
+            if operation == "create" and file_exists:
+                logger.warning(f"檔案 {filepath} 已存在，但收到 create 指令，將改以 overwrite。")
+
+            atomic_write(filepath, file.code)
+
+            if file_exists:
+                updated_files.append(str(filepath))
+                logger.info(f"已更新檔案: {filepath}")
+            else:
+                saved_files.append(str(filepath))
+                logger.info(f"已建立檔案: {filepath}")
+
         info_file = project_dir / "PROJECT_INFO.json"
-        with open(info_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "project_name": project.project_name,
-                "description": project.description,
-                "main_file": project.main_file,
-                "setup_instructions": project.setup_instructions,
-                "run_instructions": project.run_instructions,
-                "files": [asdict(file) for file in project.files]
-            }, f, indent=2, ensure_ascii=False)
-        
-        if info_file not in saved_files and info_file not in updated_files:
-            saved_files.append(str(info_file))
-        
-        return saved_files, updated_files
+        atomic_write(info_file, json.dumps({
+            "project_name": project.project_name,
+            "description": project.description,
+            "main_file": project.main_file,
+            "setup_instructions": project.setup_instructions,
+            "run_instructions": project.run_instructions,
+            "modification_mode": project.modification_mode,
+            "modification_plan": project.modification_plan,
+            "files": [asdict(file) for file in project.files]
+        }, indent=2, ensure_ascii=False))
+
+        if str(info_file) not in saved_files and str(info_file) not in updated_files:
+            updated_files.append(str(info_file))
+
+        return saved_files, updated_files, deleted_files
 
 # ============================================
 # 程式執行管理 - 改進版,增加Terminal輸出捕獲
@@ -2478,9 +2775,10 @@ class ProcessManager:
             
             # Step 5: 儲存專案檔案
             logger.info("Step 5: 儲存專案檔案...")
-            saved_files, updated_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
+            saved_files, updated_files, deleted_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
             result.files_created = saved_files
             result.files_updated = updated_files
+            result.files_deleted = deleted_files
             
             # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
