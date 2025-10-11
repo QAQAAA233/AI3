@@ -704,7 +704,7 @@ class ConversationManager:
             return False
     
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
                    usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
         """添加消息到對話歷史 - 支持 usage_metadata"""
@@ -722,6 +722,11 @@ class ConversationManager:
         
         conversation.messages.append(message)
         ConversationManager.save_conversation(conversation)
+
+        try:
+            ProjectManager.update_last_accessed(project_dir, message.timestamp)
+        except Exception as e:
+            logger.warning(f"更新專案最近使用時間失敗: {e}")
 
     @staticmethod
     def update_memory_state(project_dir: str, memory_snapshot: Optional[Dict], evaluation_snapshot: Optional[Dict]):
@@ -908,7 +913,8 @@ class ProjectManager:
         return "\n".join(structure_lines)
     
     @staticmethod
-    def add_to_project_list(project_dir: str, project_name: str, description: str = "", status: str = 'ready'):
+    def add_to_project_list(project_dir: str, project_name: str, description: str = "", status: str = 'ready',
+                            update_last_accessed: bool = True):
         """添加專案到列表"""
         try:
             normalized_dir = str(Path(project_dir))
@@ -919,18 +925,20 @@ class ProjectManager:
             if existing:
                 existing['name'] = project_name
                 existing['description'] = description
-                existing['last_accessed'] = datetime.now().isoformat()
+                if update_last_accessed:
+                    existing['last_accessed'] = datetime.now().isoformat()
                 if status:
                     existing['status'] = status
                 else:
                     existing.pop('status', None)
             else:
+                timestamp = datetime.now().isoformat()
                 entry = {
                     'path': normalized_dir,
                     'name': project_name,
                     'description': description,
-                    'created_at': datetime.now().isoformat(),
-                    'last_accessed': datetime.now().isoformat()
+                    'created_at': timestamp,
+                    'last_accessed': timestamp
                 }
                 if status:
                     entry['status'] = status
@@ -1010,6 +1018,26 @@ class ProjectManager:
             return True
         except Exception as e:
             logger.error(f"移除專案失敗: {e}")
+            return False
+
+    @staticmethod
+    def update_last_accessed(project_dir: str, timestamp: Optional[str] = None) -> bool:
+        """更新專案的最後使用時間"""
+        project_list = ProjectManager.get_project_list()
+        normalized_dir = str(Path(project_dir))
+        existing = next((p for p in project_list if p['path'] == normalized_dir), None)
+
+        if not existing:
+            return False
+
+        existing['last_accessed'] = timestamp or datetime.now().isoformat()
+
+        try:
+            with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump(project_list, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            logger.error(f"更新專案最近使用時間失敗: {e}")
             return False
 
 # ============================================
@@ -2800,7 +2828,8 @@ def load_project():
             project_dir,
             project_info.get('project_name', project_dir_path.name),
             project_info.get('description', ''),
-            status='ready'
+            status='ready',
+            update_last_accessed=False
         )
 
         # ⭐ 修復:正確序列化對話消息,保留 usage_metadata

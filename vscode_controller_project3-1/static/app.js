@@ -111,17 +111,23 @@ function getFolderNameFromPath(path) {
 function upsertProjectListEntry(entry) {
     if (!entry || !entry.path) return;
 
-    const now = new Date().toISOString();
-    entry.last_accessed = entry.last_accessed || now;
-
     const existingIndex = allProjects.findIndex(project => project.path === entry.path);
     if (existingIndex >= 0) {
-        allProjects[existingIndex] = { ...allProjects[existingIndex], ...entry };
+        const existing = allProjects[existingIndex];
+        const merged = { ...existing, ...entry };
+
+        if (!entry.last_accessed && existing.last_accessed) {
+            merged.last_accessed = existing.last_accessed;
+        }
+
+        allProjects[existingIndex] = merged;
     } else {
+        const now = new Date().toISOString();
         allProjects.unshift({
-            created_at: now,
-            description: '',
-            status: 'ready',
+            created_at: entry.created_at || now,
+            description: entry.description || '',
+            status: entry.status || 'ready',
+            last_accessed: entry.last_accessed || now,
             ...entry
         });
     }
@@ -1329,7 +1335,11 @@ function displayProjectsList(projects) {
 }
 
 function getTimeAgo(dateString) {
+    if (!dateString) return '尚未有活動';
+
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return '尚未有活動';
+
     const now = new Date();
     const seconds = Math.floor((now - date) / 1000);
     
