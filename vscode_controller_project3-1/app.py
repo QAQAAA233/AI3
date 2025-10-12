@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from enum import Enum
+import hashlib
 
 # Web framework imports
 from flask import Flask, render_template, jsonify, request, send_file
@@ -111,7 +112,7 @@ class FileOutput:
     """單個檔案輸出結構"""
     filename: str
     filetype: str
-    code: str
+    code: str = ""
     opens_window: bool = False
     window_title: Optional[str] = None
     install_requirements: Optional[List[str]] = None
@@ -123,6 +124,10 @@ class FileOutput:
     server_address: Optional[str] = None
     web_title: Optional[str] = None
     file_operation: Optional[str] = None
+    patch: Optional[str] = None
+    search_replace_blocks: Optional[List[Dict[str, Any]]] = None
+    expected_checksum: Optional[str] = None
+    note: Optional[str] = None
 
 @dataclass
 class ProjectOutput:
@@ -213,6 +218,7 @@ class ProcessResult:
     output: str = ""
     files_created: List[str] = field(default_factory=list)
     files_updated: List[str] = field(default_factory=list)
+    files_deleted: List[str] = field(default_factory=list)
     project_data: Optional[ProjectOutput] = None
     ai_response: str = ""
     ai_response_json: Optional[Dict] = None
@@ -306,7 +312,7 @@ def get_json_schema():
                                     "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
                                     "description": "檔案語言/型別"
                                 },
-                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；嚴禁使用省略號。"},
+                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；嚴禁使用省略號。若為 git patch/搜尋替換操作可填空字串。"},
                                 "opens_window": {"type": "boolean", "description": "是否會開啟原生視窗或GUI"},
                                 "window_title": {"type": ["string", "null"], "description": "視窗標題(若有視窗則填)"},
                                 "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝項(如 pip install package)；須與 dependencies 對齊。"},
@@ -316,7 +322,37 @@ def get_json_schema():
                                 "is_web_app": {"type": "boolean", "description": "是否為Web應用(HTTP伺服/前端)"},
                                 "can_open_standalone": {"type": "boolean", "description": "是否能自動開啟獨立瀏覽器視窗"},
                                 "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
-                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"}
+                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"},
+                                "file_operation": {
+                                    "type": "string",
+                                    "enum": [
+                                        "create",
+                                        "overwrite",
+                                        "update",
+                                        "patch",
+                                        "git_patch",
+                                        "search_replace",
+                                        "delete",
+                                        "skip"
+                                    ],
+                                    "description": "檔案操作模式：create/overwrite 為完整寫入；git_patch 使用 unified diff；search_replace 使用搜尋替換；delete 移除既有檔案。"
+                                },
+                                "patch": {"type": "string", "description": "使用 unified diff / git patch 格式描述的修改內容。建議僅在目標檔案已存在時提供。"},
+                                "search_replace_blocks": {
+                                    "type": "array",
+                                    "description": "搜尋/替換操作列表；按順序套用於既有檔案。",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "search": {"type": "string", "description": "要尋找的完整程式碼區塊，需精準匹配。"},
+                                            "replace": {"type": "string", "description": "替換的程式碼區塊，可為空字串代表刪除。"},
+                                            "count": {"type": ["integer", "string"], "description": "替換次數；預設僅替換首次。可用 'all' 表示全部。"}
+                                        },
+                                        "required": ["search", "replace"]
+                                    }
+                                },
+                                "expected_checksum": {"type": "string", "description": "(選填) 目前檔案的 sha256 校驗碼，例如 'sha256:abc123'；不符合時將拒絕套用。"},
+                                "note": {"type": "string", "description": "補充說明或注意事項。"}
                             },
                             "required": ["filename", "filetype", "code", "opens_window"]
                         }
@@ -372,11 +408,21 @@ JSON 結構必須包含以下欄位:
               "is_web_app":true/false,
               "can_open_standalone":true/false,
               "server_address":"http://localhost:5000"或null,
-              "web_title":"字串或null"
+              "web_title":"字串或null",
+              "file_operation":"create/overwrite/git_patch/search_replace/delete...",
+              "patch":"(選填) unified diff 內容",
+              "search_replace_blocks":[{"search":"舊程式碼","replace":"新程式碼"}],
+              "expected_checksum":"sha256:..."
           }
       ]
   }
 }
+
+附加檔案編輯規範：
+- 若需修改既有檔案，優先產出 unified diff：設定 "file_operation": "git_patch" (或 "patch")，並於 "patch" 欄位提供 git 風格的 diff；避免行號與過度上下文。
+- 若 diff 無法準確定位，可改用 "file_operation": "search_replace" 並提供 `search_replace_blocks`，每個搜尋區塊僅會替換第一個匹配，可視需要重複列出多組。
+- 僅在建立新檔案或需要完整覆蓋時，才提供完整 `code` 並將 `file_operation` 設為 `create`/`overwrite`；否則 `code` 可留空字串。
+- 可填入 `expected_checksum` (格式 `sha256:...`) 來防止版本漂移，校驗失敗時後端會拒絕套用。
 
 核心規範(誘導思考而非訂目標):
 1) 僅輸出有效 JSON；不得加入 Markdown/註解/多餘文字。
@@ -1708,6 +1754,67 @@ class CodeProcessor:
                 if isinstance(code, str):
                     code = normalize_code_content(code)
 
+                file_operation = file_data.get('file_operation') or file_data.get('operation')
+                if isinstance(file_operation, str):
+                    file_operation = file_operation.strip().lower()
+                else:
+                    file_operation = None
+
+                patch_text = file_data.get('patch') or file_data.get('git_patch') or file_data.get('diff')
+                if isinstance(patch_text, list):
+                    patch_text = '\n'.join(str(part) for part in patch_text)
+                if isinstance(patch_text, str):
+                    patch_text = normalize_code_content(patch_text)
+                    patch_text = patch_text.strip('\n') if patch_text else patch_text
+                else:
+                    patch_text = None
+
+                raw_blocks = (
+                    file_data.get('search_replace_blocks')
+                    or file_data.get('search_replace')
+                    or file_data.get('edits')
+                    or file_data.get('operations')
+                )
+
+                search_blocks: Optional[List[Dict[str, Any]]] = None
+                if isinstance(raw_blocks, list):
+                    parsed_blocks: List[Dict[str, Any]] = []
+                    for block in raw_blocks:
+                        if not isinstance(block, dict):
+                            continue
+
+                        search = block.get('search') or block.get('find') or block.get('from')
+                        replace = block.get('replace') or block.get('to') or block.get('with')
+                        if isinstance(search, str):
+                            search = normalize_code_content(search)
+                        if isinstance(replace, str):
+                            replace = normalize_code_content(replace)
+
+                        if search is None:
+                            continue
+
+                        parsed_block = {
+                            'search': search,
+                            'replace': replace if replace is not None else ''
+                        }
+
+                        if 'count' in block and block['count'] not in (None, ''):
+                            parsed_block['count'] = block['count']
+
+                        if 'preserve_indentation' in block:
+                            parsed_block['preserve_indentation'] = block['preserve_indentation']
+
+                        parsed_blocks.append(parsed_block)
+
+                    if parsed_blocks:
+                        search_blocks = parsed_blocks
+
+                expected_checksum = file_data.get('expected_checksum') or file_data.get('checksum')
+                if isinstance(expected_checksum, str):
+                    expected_checksum = expected_checksum.strip()
+                else:
+                    expected_checksum = None
+
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
                     filetype=file_data.get('filetype', 'text'),
@@ -1721,7 +1828,12 @@ class CodeProcessor:
                     is_web_app=file_data.get('is_web_app', False),
                     can_open_standalone=file_data.get('can_open_standalone', False),
                     server_address=file_data.get('server_address'),
-                    web_title=file_data.get('web_title')
+                    web_title=file_data.get('web_title'),
+                    file_operation=file_operation,
+                    patch=patch_text,
+                    search_replace_blocks=search_blocks,
+                    expected_checksum=expected_checksum,
+                    note=file_data.get('note')
                 ))
 
             return ProjectOutput(
@@ -1778,39 +1890,142 @@ class CodeProcessor:
         return logs
     
     @staticmethod
-    def save_project_files(folder_path: str, project: ProjectOutput, is_iteration: bool = False) -> Tuple[List[str], List[str]]:
-        """儲存專案檔案(支持迭代更新)"""
-        saved_files = []
-        updated_files = []
+    def save_project_files(
+        folder_path: str,
+        project: ProjectOutput,
+        is_iteration: bool = False
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """儲存專案檔案(支持迭代更新/局部修補)"""
+
+        saved_files: List[str] = []
+        updated_files: List[str] = []
+        deleted_files: List[str] = []
+
         project_dir = Path(folder_path)
-        
         if not is_iteration:
             project_dir = project_dir / project.project_name
-        
+
         project_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        final_files: List[FileOutput] = []
+
         for file in project.files:
             filepath = project_dir / file.filename
-            
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
+
+            operation = (file.file_operation or '').lower() if file.file_operation else ''
+            file_exists = filepath.exists()
+
             try:
-                file_exists = filepath.exists()
-                
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(file.code)
-                
-                if file_exists:
-                    logger.info(f"已更新檔案: {filepath}")
+                if operation in {'delete', 'remove'}:
+                    if file_exists:
+                        filepath.unlink()
+                        logger.info(f"已刪除檔案: {filepath}")
+                        deleted_files.append(str(filepath))
+                    else:
+                        logger.warning(f"跳過刪除: 檔案不存在 {filepath}")
+                    continue
+
+                if operation in {'skip', 'noop'}:
+                    if file_exists:
+                        with open(filepath, 'r', encoding='utf-8') as existing:
+                            file.code = existing.read()
+                    else:
+                        logger.warning(f"skip 操作但檔案不存在: {filepath}")
+                        file.code = file.code or ''
+                    file.file_operation = None
+                    file.patch = None
+                    file.search_replace_blocks = None
+                    file.expected_checksum = None
+                    final_files.append(file)
+                    continue
+
+                if file.expected_checksum:
+                    if not file_exists:
+                        raise FileNotFoundError(
+                            f"檔案 {filepath} 缺少原始版本，無法驗證 checksum"
+                        )
+                    CodeProcessor._verify_checksum(filepath, file.expected_checksum)
+
+                if operation in {'patch', 'git_patch', 'unified_diff', 'diff'}:
+                    if not file_exists:
+                        raise FileNotFoundError(f"無法套用 git patch，檔案不存在: {filepath}")
+
+                    patch_text = file.patch
+                    if not patch_text and file.code and any(token in file.code for token in ('@@', '---', '+++')):
+                        patch_text = file.code
+
+                    if not patch_text:
+                        raise ValueError(f"檔案 {file.filename} 的 git patch 內容為空")
+
+                    with open(filepath, 'r', encoding='utf-8') as existing:
+                        original_content = existing.read()
+
+                    try:
+                        new_content = CodeProcessor.apply_unified_patch(original_content, patch_text)
+                    except ValueError as e:
+                        raise ValueError(f"套用 git patch 失敗 ({filepath}): {e}") from e
+
+                    with open(filepath, 'w', encoding='utf-8') as out:
+                        out.write(new_content)
+
+                    file.code = new_content
                     updated_files.append(str(filepath))
+                    logger.info(f"已套用 git patch: {filepath}")
+
+                elif operation in {'search_replace', 'search-replace', 'searchreplace'}:
+                    if not file_exists:
+                        raise FileNotFoundError(f"無法套用搜尋/替換，檔案不存在: {filepath}")
+
+                    if not file.search_replace_blocks:
+                        raise ValueError(f"檔案 {file.filename} 缺少 search_replace_blocks 定義")
+
+                    with open(filepath, 'r', encoding='utf-8') as existing:
+                        original_content = existing.read()
+
+                    try:
+                        new_content = CodeProcessor.apply_search_replace_blocks(
+                            original_content,
+                            file.search_replace_blocks,
+                            filepath
+                        )
+                    except ValueError as e:
+                        raise ValueError(f"搜尋/替換失敗 ({filepath}): {e}") from e
+
+                    with open(filepath, 'w', encoding='utf-8') as out:
+                        out.write(new_content)
+
+                    file.code = new_content
+                    updated_files.append(str(filepath))
+                    logger.info(f"已套用搜尋/替換: {filepath}")
+
                 else:
-                    logger.info(f"已建立檔案: {filepath}")
-                    saved_files.append(str(filepath))
-                
+                    content = file.code if isinstance(file.code, str) else (file.code or '')
+
+                    with open(filepath, 'w', encoding='utf-8') as out:
+                        out.write(content)
+
+                    file.code = content
+
+                    if file_exists:
+                        logger.info(f"已更新檔案: {filepath}")
+                        updated_files.append(str(filepath))
+                    else:
+                        logger.info(f"已建立檔案: {filepath}")
+                        saved_files.append(str(filepath))
+
+                file.file_operation = None
+                file.patch = None
+                file.search_replace_blocks = None
+                file.expected_checksum = None
+                final_files.append(file)
+
             except IOError as e:
                 logger.error(f"儲存檔案失敗 {filepath}: {e}")
                 raise
-        
+
+        project.files = final_files
+
         info_file = project_dir / "PROJECT_INFO.json"
         with open(info_file, 'w', encoding='utf-8') as f:
             json.dump({
@@ -1821,11 +2036,190 @@ class CodeProcessor:
                 "run_instructions": project.run_instructions,
                 "files": [asdict(file) for file in project.files]
             }, f, indent=2, ensure_ascii=False)
-        
+
         if info_file not in saved_files and info_file not in updated_files:
             saved_files.append(str(info_file))
-        
-        return saved_files, updated_files
+
+        return saved_files, updated_files, deleted_files
+
+    @staticmethod
+    def _verify_checksum(filepath: Path, expected: str) -> None:
+        """驗證檔案 checksum 是否匹配"""
+
+        algorithm, _, digest = expected.partition(':')
+        if digest:
+            algo = algorithm.strip().lower()
+            expected_digest = digest.strip().lower()
+        else:
+            algo = 'sha256'
+            expected_digest = algorithm.strip().lower()
+
+        if algo not in {'sha256', 'sha-256', 'sha256sum'}:
+            raise ValueError(f"不支援的 checksum 演算法: {algo}")
+
+        with open(filepath, 'rb') as f:
+            file_digest = hashlib.sha256(f.read()).hexdigest().lower()
+
+        if file_digest != expected_digest:
+            raise ValueError(
+                f"檔案 {filepath} 的校驗碼不符合，預期 {expected_digest}，實際 {file_digest}"
+            )
+
+    @staticmethod
+    def apply_unified_patch(original: str, patch_text: str) -> str:
+        """套用 unified diff / git patch"""
+
+        if not patch_text.strip():
+            return original
+
+        original_lines = original.split('\n')
+        diff_lines = patch_text.splitlines()
+
+        file_headers = [line for line in diff_lines if line.startswith('--- ')]
+        if len(file_headers) > 1:
+            raise ValueError("git patch 僅支援單一檔案，請拆分後再套用")
+
+        result_lines: List[str] = []
+        original_index = 0
+        end_with_newline = original.endswith('\n')
+
+        i = 0
+        while i < len(diff_lines):
+            line = diff_lines[i]
+
+            if line.startswith('diff ') or line.startswith('index '):
+                i += 1
+                continue
+
+            if line.startswith('--- ') or line.startswith('+++ '):
+                i += 1
+                continue
+
+            if line.startswith('@@'):
+                match = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
+                if not match:
+                    raise ValueError(f"git patch 解析失敗: 無效的 hunk 標頭 -> {line}")
+
+                start_old = int(match.group(1))
+                start_index = max(start_old - 1, 0)
+
+                if start_index > len(original_lines):
+                    raise ValueError("git patch 解析失敗: hunk 起始超出原檔案長度")
+
+                result_lines.extend(original_lines[original_index:start_index])
+                original_index = start_index
+
+                i += 1
+                while i < len(diff_lines) and not diff_lines[i].startswith('@@'):
+                    hunk_line = diff_lines[i]
+
+                    if hunk_line.startswith('\\'):
+                        if 'No newline at end of file' in hunk_line:
+                            prev_line = diff_lines[i - 1] if i > 0 else ''
+                            if prev_line.startswith('+'):
+                                end_with_newline = False
+                            elif prev_line.startswith('-'):
+                                end_with_newline = True
+                        i += 1
+                        continue
+
+                    if not hunk_line:
+                        i += 1
+                        continue
+
+                    prefix = hunk_line[0]
+                    content = hunk_line[1:]
+
+                    if prefix == ' ':
+                        if original_index >= len(original_lines):
+                            raise ValueError("git patch 套用失敗: 原始內容不足 (context)")
+                        if original_lines[original_index] != content:
+                            raise ValueError(
+                                "git patch 套用失敗: context 不匹配"
+                            )
+                        result_lines.append(content)
+                        original_index += 1
+
+                    elif prefix == '-':
+                        if original_index >= len(original_lines):
+                            raise ValueError("git patch 套用失敗: 原始內容不足 (remove)")
+                        if original_lines[original_index] != content:
+                            raise ValueError("git patch 套用失敗: 要刪除的內容不匹配")
+                        original_index += 1
+
+                    elif prefix == '+':
+                        result_lines.append(content)
+
+                    else:
+                        raise ValueError(f"git patch 套用失敗: 未知的 hunk 標記 {prefix}")
+
+                    i += 1
+
+                continue
+
+            i += 1
+
+        result_lines.extend(original_lines[original_index:])
+
+        result_text = '\n'.join(result_lines)
+        if end_with_newline and result_lines and not result_text.endswith('\n'):
+            result_text += '\n'
+
+        return result_text
+
+    @staticmethod
+    def apply_search_replace_blocks(
+        original: str,
+        blocks: List[Dict[str, Any]],
+        filepath: Path
+    ) -> str:
+        """依序套用搜尋/替換區塊"""
+
+        content = original
+
+        for index, block in enumerate(blocks, start=1):
+            search = block.get('search')
+            replace = block.get('replace', '')
+
+            if not isinstance(search, str):
+                raise ValueError(f"搜尋區塊 {index} 缺少有效的 'search' 字串: {filepath}")
+
+            if not isinstance(replace, str):
+                replace = str(replace)
+
+            count = block.get('count')
+
+            if count is None or count == '' or count == 1:
+                occurrences = content.count(search)
+                if occurrences == 0:
+                    raise ValueError(
+                        f"搜尋區塊 {index} 在 {filepath} 中找不到對應內容"
+                    )
+                content = content.replace(search, replace, 1)
+
+            elif isinstance(count, str) and count.lower() == 'all':
+                if search not in content:
+                    raise ValueError(
+                        f"搜尋區塊 {index} 在 {filepath} 中找不到對應內容"
+                    )
+                content = content.replace(search, replace)
+
+            else:
+                try:
+                    repetitions = int(count)
+                except (TypeError, ValueError):
+                    repetitions = 1
+
+                repetitions = max(repetitions, 1)
+
+                for _ in range(repetitions):
+                    if search not in content:
+                        raise ValueError(
+                            f"搜尋區塊 {index} 在 {filepath} 中找不到足夠的匹配"
+                        )
+                    content = content.replace(search, replace, 1)
+
+        return content
 
 # ============================================
 # 程式執行管理 - 改進版,增加Terminal輸出捕獲
@@ -2478,9 +2872,14 @@ class ProcessManager:
             
             # Step 5: 儲存專案檔案
             logger.info("Step 5: 儲存專案檔案...")
-            saved_files, updated_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
+            saved_files, updated_files, deleted_files = CodeProcessor.save_project_files(
+                folder_path,
+                project,
+                is_iteration
+            )
             result.files_created = saved_files
             result.files_updated = updated_files
+            result.files_deleted = deleted_files
             
             # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
@@ -2626,7 +3025,16 @@ class ProcessManager:
                 window_info = f" (視窗: {file.window_title})" if file.opens_window and file.window_title else ""
                 update_status = " [已更新]" if str(Path(final_project_dir) / file.filename) in updated_files else " [新建]"
                 result.output += f"{file_icon} {file.filename}{update_status} - {file.description or file.filetype}{window_info}\n"
-            
+
+            if result.files_deleted:
+                result.output += "=== 🗑️ 已刪除檔案 ===\n"
+                for deleted_path in result.files_deleted:
+                    try:
+                        rel_deleted = Path(deleted_path).relative_to(Path(final_project_dir))
+                    except ValueError:
+                        rel_deleted = Path(deleted_path).name
+                    result.output += f"🗑️ {rel_deleted}\n"
+
             result.output += f"""
 === 💻 VS Code 狀態 ===
 {'✅ 已開啟' if vscode_result.get('success') else '⚠️ 開啟失敗'}
@@ -3014,6 +3422,7 @@ def run_process():
             'output': result.output,
             'files_created': result.files_created,
             'files_updated': result.files_updated,
+            'files_deleted': result.files_deleted,
             'ai_response': result.ai_response or '無 AI 回應',
             'ai_response_json': result.ai_response_json,
             'installation_logs': result.installation_logs,
