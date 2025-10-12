@@ -19,6 +19,7 @@ let projectMemoryState = {};
 let autoAttachMemory = true;
 let loadingRequestCounter = 0; // <-- 新增此行
 const messageDiagnosticsHolderMap = new WeakMap();
+const messageTerminalSectionMap = new WeakMap();
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -526,6 +527,41 @@ function applyDiagnosticsToMessage(messageElement, report = []) {
     holder.style.display = 'block';
 }
 
+function attachTerminalOutputToMessage(messageElement, terminalOutput) {
+    if (!messageElement) return;
+
+    const safeOutput = typeof terminalOutput === 'string' ? terminalOutput : '';
+    if (!safeOutput.trim()) {
+        return;
+    }
+
+    let body = messageTerminalSectionMap.get(messageElement);
+
+    if (!body) {
+        const terminalSection = document.createElement('div');
+        terminalSection.className = 'terminal-output-section';
+
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-header';
+
+        const terminalTitle = document.createElement('span');
+        terminalTitle.className = 'terminal-title';
+        terminalTitle.textContent = 'Terminal 輸出';
+        terminalHeader.appendChild(terminalTitle);
+
+        body = document.createElement('div');
+        body.className = 'terminal-body selectable';
+
+        terminalSection.append(terminalHeader, body);
+        messageElement.appendChild(terminalSection);
+
+        messageTerminalSectionMap.set(messageElement, body);
+    }
+
+    body.textContent = safeOutput;
+    messageElement.dataset.hasTerminalOutput = 'true';
+}
+
 function getCurrentMemoryState() {
     if (!currentProjectDir) return null;
     return projectMemoryState[currentProjectDir] || null;
@@ -901,10 +937,16 @@ async function handleSubmit() {
             } else if (attachDiagnostics) {
                 applyDiagnosticsToMessage(userMessage, []);
             }
+
+            if (result.terminal_output) {
+                attachTerminalOutputToMessage(userMessage, result.terminal_output);
+            } else if (attachTerminal) {
+                attachTerminalOutputToMessage(userMessage, '未捕獲到 Terminal 輸出，請確認程式是否正在執行。');
+            }
         }
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, [], {
+            addMessage('assistant', result.output, result.usage_metadata, null, [], {
                 evaluation: result.evaluation_snapshot,
                 memory: result.memory_snapshot
             });
@@ -963,6 +1005,10 @@ async function handleSubmit() {
             showNotification(`執行失敗：${result.error}`, 'error');
         }
     } catch (error) {
+        if (userMessage && attachTerminal) {
+            attachTerminalOutputToMessage(userMessage, '無法取得 Terminal 輸出：請稍後重試。');
+        }
+
         addMessage('assistant', `✕ 連接錯誤：${error}`);
         showNotification(`連接錯誤：${error}`, 'error');
     } finally {
@@ -1101,22 +1147,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
     }
 
     if (terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-
-        const terminalHeader = document.createElement('div');
-        terminalHeader.className = 'terminal-header';
-        const terminalTitle = document.createElement('span');
-        terminalTitle.className = 'terminal-title';
-        terminalTitle.textContent = 'Terminal 輸出';
-        terminalHeader.appendChild(terminalTitle);
-
-        const terminalBody = document.createElement('div');
-        terminalBody.className = 'terminal-body selectable';
-        terminalBody.textContent = terminalOutput;
-
-        terminalSection.append(terminalHeader, terminalBody);
-        message.appendChild(terminalSection);
+        attachTerminalOutputToMessage(message, terminalOutput);
     }
 
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
@@ -1448,11 +1479,15 @@ async function loadExistingProject(projectDir) {
                             normalizedMetadata.diagnosticsReport = rawMetadata.diagnostics_report;
                         }
 
+                        const terminalOutputForMessage = msg.role === 'assistant'
+                            ? null
+                            : msg.terminal_output;
+
                         addMessage(
                             msg.role,
                             msg.content,
                             msg.usage_metadata,
-                            msg.terminal_output,
+                            terminalOutputForMessage,
                             msg.files || [],
                             normalizedMetadata
                         );
