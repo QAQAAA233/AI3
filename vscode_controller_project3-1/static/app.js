@@ -526,6 +526,49 @@ function applyDiagnosticsToMessage(messageElement, report = []) {
     holder.style.display = 'block';
 }
 
+function renderTerminalSection(messageElement, terminalOutput) {
+    if (!messageElement) return;
+
+    const trimmed = (terminalOutput || '').trim();
+    const existingSection = messageElement.querySelector('.terminal-output-section');
+
+    if (!trimmed) {
+        if (existingSection) {
+            existingSection.remove();
+        }
+        return;
+    }
+
+    let terminalSection = existingSection;
+    if (!terminalSection) {
+        terminalSection = document.createElement('div');
+        terminalSection.className = 'terminal-output-section';
+
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-header';
+        const terminalTitle = document.createElement('span');
+        terminalTitle.className = 'terminal-title';
+        terminalTitle.textContent = 'Terminal 輸出';
+        terminalHeader.appendChild(terminalTitle);
+
+        const terminalBody = document.createElement('div');
+        terminalBody.className = 'terminal-body selectable';
+        terminalSection.append(terminalHeader, terminalBody);
+
+        const tokenUsage = messageElement.querySelector('.token-usage');
+        if (tokenUsage) {
+            messageElement.insertBefore(terminalSection, tokenUsage);
+        } else {
+            messageElement.appendChild(terminalSection);
+        }
+    }
+
+    const terminalBody = terminalSection.querySelector('.terminal-body');
+    if (terminalBody) {
+        terminalBody.textContent = terminalOutput;
+    }
+}
+
 function getCurrentMemoryState() {
     if (!currentProjectDir) return null;
     return projectMemoryState[currentProjectDir] || null;
@@ -904,7 +947,12 @@ async function handleSubmit() {
         }
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, [], {
+            if (userMessage) {
+                renderTerminalSection(userMessage, result.terminal_output);
+            }
+
+            const assistantTerminalOutput = userMessage ? null : result.terminal_output;
+            addMessage('assistant', result.output, result.usage_metadata, assistantTerminalOutput, [], {
                 evaluation: result.evaluation_snapshot,
                 memory: result.memory_snapshot
             });
@@ -959,6 +1007,9 @@ async function handleSubmit() {
             updateFilesPreview();
             updateAttachedFilesDisplay();
         } else {
+            if (userMessage) {
+                renderTerminalSection(userMessage, result.terminal_output);
+            }
             addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
             showNotification(`執行失敗：${result.error}`, 'error');
         }
@@ -1100,24 +1151,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
         applyDiagnosticsToMessage(message, metadata.diagnosticsReport);
     }
 
-    if (terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-
-        const terminalHeader = document.createElement('div');
-        terminalHeader.className = 'terminal-header';
-        const terminalTitle = document.createElement('span');
-        terminalTitle.className = 'terminal-title';
-        terminalTitle.textContent = 'Terminal 輸出';
-        terminalHeader.appendChild(terminalTitle);
-
-        const terminalBody = document.createElement('div');
-        terminalBody.className = 'terminal-body selectable';
-        terminalBody.textContent = terminalOutput;
-
-        terminalSection.append(terminalHeader, terminalBody);
-        message.appendChild(terminalSection);
-    }
+    renderTerminalSection(message, terminalOutput);
 
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
