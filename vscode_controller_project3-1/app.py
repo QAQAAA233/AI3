@@ -14,11 +14,12 @@ import threading
 import time
 import re
 import json
+import difflib
 import shutil
 import platform
 import logging
 import queue
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Set
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
@@ -125,6 +126,24 @@ class FileOutput:
     file_operation: Optional[str] = None
 
 @dataclass
+class FileEditOperation:
+    """既有檔案的增量修改操作"""
+    op: str
+    file: Optional[str] = None
+    from_path: Optional[str] = None
+    to_path: Optional[str] = None
+    search: Optional[str] = None
+    replace: Optional[str] = None
+    preserve_indentation: Optional[bool] = True
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    old_content: Optional[str] = None
+    new_content: Optional[str] = None
+    hunk: Optional[Dict[str, Any]] = None
+    content: Optional[str] = None
+    description: Optional[str] = None
+
+@dataclass
 class ProjectOutput:
     """專案輸出結構(支持多檔案)"""
     project_name: str
@@ -133,6 +152,7 @@ class ProjectOutput:
     main_file: Optional[str] = None
     setup_instructions: Optional[List[str]] = None
     run_instructions: Optional[List[str]] = None
+    operations: List[FileEditOperation] = field(default_factory=list)
 
 @dataclass
 class AIConfig:
@@ -225,6 +245,8 @@ class ProcessResult:
     memory_snapshot: Optional[Dict[str, Any]] = None
     evaluation_snapshot: Optional[Dict[str, Any]] = None
     diagnostics_report: List[Dict[str, Any]] = field(default_factory=list)
+    operations_applied: List[Dict[str, Any]] = field(default_factory=list)
+    operations_failed: List[Dict[str, Any]] = field(default_factory=list)
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -319,6 +341,94 @@ def get_json_schema():
                                 "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"}
                             },
                             "required": ["filename", "filetype", "code", "opens_window"]
+                        }
+                    },
+                    "operations": {
+                        "type": "array",
+                        "description": "針對既有檔案的增量修改操作；僅在檔案已存在時使用。",
+                        "items": {
+                            "oneOf": [
+                                {
+                                    "title": "Search/Replace Operation",
+                                    "type": "object",
+                                    "required": ["op", "file", "search", "replace"],
+                                    "properties": {
+                                        "op": {"const": "search_replace"},
+                                        "file": {"type": "string", "description": "相對於專案根目錄的檔案路徑"},
+                                        "search": {"type": "string", "description": "必須在既有檔案中找到的程式碼區塊"},
+                                        "replace": {"type": "string", "description": "要替換成的新程式碼區塊"},
+                                        "preserve_indentation": {"type": "boolean", "description": "若為 true 則自動套用原縮排"},
+                                        "description": {"type": "string", "description": "此修改的說明(選填)"}
+                                    }
+                                },
+                                {
+                                    "title": "Line Range Edit",
+                                    "type": "object",
+                                    "required": ["op", "file", "start_line", "end_line", "new_content"],
+                                    "properties": {
+                                        "op": {"const": "edit_lines"},
+                                        "file": {"type": "string"},
+                                        "start_line": {"type": "integer", "minimum": 1, "description": "起始行(1-based)"},
+                                        "end_line": {"type": "integer", "minimum": 1, "description": "結束行(1-based, 含)"},
+                                        "old_content": {"type": "string", "description": "可選的安全檢查，表示預期被替換的原始內容"},
+                                        "new_content": {"type": "string", "description": "替換後的程式碼"},
+                                        "description": {"type": "string"}
+                                    }
+                                },
+                                {
+                                    "title": "Unified Diff Hunk",
+                                    "type": "object",
+                                    "required": ["op", "file", "hunk"],
+                                    "properties": {
+                                        "op": {"const": "unified_diff"},
+                                        "file": {"type": "string"},
+                                        "hunk": {
+                                            "type": "object",
+                                            "required": ["context_before", "removed", "added", "context_after"],
+                                            "properties": {
+                                                "context_before": {"type": "array", "items": {"type": "string"}},
+                                                "removed": {"type": "array", "items": {"type": "string"}},
+                                                "added": {"type": "array", "items": {"type": "string"}},
+                                                "context_after": {"type": "array", "items": {"type": "string"}}
+                                            }
+                                        },
+                                        "description": {"type": "string"}
+                                    }
+                                },
+                                {
+                                    "title": "Create File",
+                                    "type": "object",
+                                    "required": ["op", "file", "content"],
+                                    "properties": {
+                                        "op": {"const": "create"},
+                                        "file": {"type": "string"},
+                                        "content": {"type": "string", "description": "新檔案的完整內容"},
+                                        "mode": {"type": "string", "description": "可選的檔案權限(如 644)"},
+                                        "description": {"type": "string"}
+                                    }
+                                },
+                                {
+                                    "title": "Delete File",
+                                    "type": "object",
+                                    "required": ["op", "file"],
+                                    "properties": {
+                                        "op": {"const": "delete"},
+                                        "file": {"type": "string"},
+                                        "description": {"type": "string"}
+                                    }
+                                },
+                                {
+                                    "title": "Move/Rename File",
+                                    "type": "object",
+                                    "required": ["op", "from", "to"],
+                                    "properties": {
+                                        "op": {"const": "move"},
+                                        "from": {"type": "string", "description": "原始路徑"},
+                                        "to": {"type": "string", "description": "新路徑"},
+                                        "description": {"type": "string"}
+                                    }
+                                }
+                            ]
                         }
                     }
                 },
@@ -1724,13 +1834,40 @@ class CodeProcessor:
                     web_title=file_data.get('web_title')
                 ))
 
+            operations = []
+            for op_data in project_section.get('operations', []) or []:
+                if not isinstance(op_data, dict):
+                    continue
+                op_type = op_data.get('op')
+                if not op_type:
+                    continue
+
+                operation = FileEditOperation(
+                    op=str(op_type),
+                    file=op_data.get('file'),
+                    from_path=op_data.get('from') or op_data.get('from_path'),
+                    to_path=op_data.get('to') or op_data.get('to_path'),
+                    search=op_data.get('search'),
+                    replace=op_data.get('replace'),
+                    preserve_indentation=op_data.get('preserve_indentation'),
+                    start_line=op_data.get('start_line'),
+                    end_line=op_data.get('end_line'),
+                    old_content=op_data.get('old_content'),
+                    new_content=op_data.get('new_content'),
+                    hunk=op_data.get('hunk'),
+                    content=op_data.get('content'),
+                    description=op_data.get('description')
+                )
+                operations.append(operation)
+
             return ProjectOutput(
                 project_name=project_section.get('project_name', 'untitled_project'),
                 description=project_section.get('description', ''),
                 files=files,
                 main_file=project_section.get('main_file'),
                 setup_instructions=project_section.get('setup_instructions'),
-                run_instructions=project_section.get('run_instructions')
+                run_instructions=project_section.get('run_instructions'),
+                operations=operations
             )
 
         except Exception as e:
@@ -1778,39 +1915,53 @@ class CodeProcessor:
         return logs
     
     @staticmethod
-    def save_project_files(folder_path: str, project: ProjectOutput, is_iteration: bool = False) -> Tuple[List[str], List[str]]:
-        """儲存專案檔案(支持迭代更新)"""
-        saved_files = []
-        updated_files = []
+    def save_project_files(
+        folder_path: str,
+        project: ProjectOutput,
+        is_iteration: bool = False
+    ) -> Tuple[List[str], List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """儲存專案檔案(支持迭代更新與增量修改)"""
+        saved_files: Set[str] = set()
+        updated_files: Set[str] = set()
         project_dir = Path(folder_path)
-        
+
         if not is_iteration:
             project_dir = project_dir / project.project_name
-        
+
         project_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for file in project.files:
             filepath = project_dir / file.filename
-            
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
+
             try:
                 file_exists = filepath.exists()
-                
+
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(file.code)
-                
+
                 if file_exists:
                     logger.info(f"已更新檔案: {filepath}")
-                    updated_files.append(str(filepath))
+                    updated_files.add(str(filepath))
                 else:
                     logger.info(f"已建立檔案: {filepath}")
-                    saved_files.append(str(filepath))
-                
+                    saved_files.add(str(filepath))
+
             except IOError as e:
                 logger.error(f"儲存檔案失敗 {filepath}: {e}")
                 raise
-        
+
+        operations_applied: List[Dict[str, Any]] = []
+        operations_failed: List[Dict[str, Any]] = []
+
+        if project.operations:
+            operations_applied, operations_failed = CodeProcessor.apply_file_operations(
+                project_dir,
+                project.operations,
+                saved_files,
+                updated_files
+            )
+
         info_file = project_dir / "PROJECT_INFO.json"
         with open(info_file, 'w', encoding='utf-8') as f:
             json.dump({
@@ -1819,13 +1970,349 @@ class CodeProcessor:
                 "main_file": project.main_file,
                 "setup_instructions": project.setup_instructions,
                 "run_instructions": project.run_instructions,
-                "files": [asdict(file) for file in project.files]
+                "files": [asdict(file) for file in project.files],
+                "operations": [asdict(op) for op in project.operations]
             }, f, indent=2, ensure_ascii=False)
-        
-        if info_file not in saved_files and info_file not in updated_files:
-            saved_files.append(str(info_file))
-        
-        return saved_files, updated_files
+
+        info_path = str(info_file)
+        if info_path not in saved_files and info_path not in updated_files:
+            saved_files.add(info_path)
+
+        return (
+            sorted(saved_files),
+            sorted(updated_files),
+            operations_applied,
+            operations_failed
+        )
+
+    @staticmethod
+    def apply_file_operations(
+        project_dir: Path,
+        operations: List[FileEditOperation],
+        saved_files: Set[str],
+        updated_files: Set[str]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """對既有檔案套用增量修改操作"""
+        applied: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+
+        try:
+            base_dir = project_dir.resolve()
+        except FileNotFoundError:
+            base_dir = project_dir
+
+        for operation in operations:
+            try:
+                info = CodeProcessor._apply_single_operation(base_dir, operation)
+                status = info.get('status')
+                path = info.get('path')
+
+                if status in {'patched', 'updated'} and path:
+                    updated_files.add(path)
+                elif status == 'created' and path:
+                    saved_files.add(path)
+                elif status == 'deleted' and path:
+                    saved_files.discard(path)
+                    updated_files.discard(path)
+                elif status == 'moved':
+                    from_path = info.get('from_path')
+                    to_path = info.get('to_path')
+                    if from_path:
+                        saved_files.discard(from_path)
+                        updated_files.discard(from_path)
+                    if to_path:
+                        updated_files.add(to_path)
+
+                applied.append(info)
+            except Exception as e:
+                target = operation.file or operation.to_path or operation.from_path or ''
+                error_info = {
+                    'op': operation.op,
+                    'file': target,
+                    'error': str(e)
+                }
+                failed.append(error_info)
+                logger.error(f"套用檔案操作失敗 ({operation.op} -> {target}): {e}")
+
+        return applied, failed
+
+    @staticmethod
+    def _apply_single_operation(base_dir: Path, operation: FileEditOperation) -> Dict[str, Any]:
+        """根據操作類型套用單一增量修改"""
+        op_type = (operation.op or '').strip()
+
+        if op_type == 'search_replace':
+            if not operation.file or operation.search is None or operation.replace is None:
+                raise ValueError("search_replace 操作缺少必要欄位")
+
+            file_path = CodeProcessor._resolve_operation_path(base_dir, operation.file)
+            if not file_path.exists():
+                raise FileNotFoundError(f"找不到目標檔案: {operation.file}")
+
+            content = file_path.read_text(encoding='utf-8')
+            preserve_indent = True if operation.preserve_indentation is None else bool(operation.preserve_indentation)
+            new_content = CodeProcessor._perform_search_replace(
+                content,
+                operation.search,
+                operation.replace,
+                preserve_indent
+            )
+            file_path.write_text(new_content, encoding='utf-8')
+
+            return {
+                'op': op_type,
+                'file': operation.file,
+                'status': 'patched',
+                'path': str(file_path)
+            }
+
+        if op_type == 'edit_lines':
+            if not operation.file or operation.start_line is None or operation.end_line is None:
+                raise ValueError("edit_lines 操作缺少必要欄位")
+
+            file_path = CodeProcessor._resolve_operation_path(base_dir, operation.file)
+            if not file_path.exists():
+                raise FileNotFoundError(f"找不到目標檔案: {operation.file}")
+
+            content = file_path.read_text(encoding='utf-8')
+            new_content = CodeProcessor._apply_edit_lines(content, operation)
+            file_path.write_text(new_content, encoding='utf-8')
+
+            return {
+                'op': op_type,
+                'file': operation.file,
+                'status': 'patched',
+                'path': str(file_path)
+            }
+
+        if op_type == 'unified_diff':
+            if not operation.file or not operation.hunk:
+                raise ValueError("unified_diff 操作缺少必要欄位")
+
+            file_path = CodeProcessor._resolve_operation_path(base_dir, operation.file)
+            if not file_path.exists():
+                raise FileNotFoundError(f"找不到目標檔案: {operation.file}")
+
+            content = file_path.read_text(encoding='utf-8')
+            new_content = CodeProcessor._apply_unified_diff(content, operation.hunk)
+            file_path.write_text(new_content, encoding='utf-8')
+
+            return {
+                'op': op_type,
+                'file': operation.file,
+                'status': 'patched',
+                'path': str(file_path)
+            }
+
+        if op_type == 'create':
+            if not operation.file:
+                raise ValueError("create 操作缺少檔案路徑")
+
+            file_path = CodeProcessor._resolve_operation_path(base_dir, operation.file)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            existed = file_path.exists()
+            file_path.write_text(operation.content or '', encoding='utf-8')
+
+            return {
+                'op': op_type,
+                'file': operation.file,
+                'status': 'updated' if existed else 'created',
+                'path': str(file_path)
+            }
+
+        if op_type == 'delete':
+            if not operation.file:
+                raise ValueError("delete 操作缺少檔案路徑")
+
+            file_path = CodeProcessor._resolve_operation_path(base_dir, operation.file)
+            if file_path.exists():
+                file_path.unlink()
+            else:
+                raise FileNotFoundError(f"要刪除的檔案不存在: {operation.file}")
+
+            return {
+                'op': op_type,
+                'file': operation.file,
+                'status': 'deleted',
+                'path': str(file_path)
+            }
+
+        if op_type == 'move':
+            from_path = operation.from_path or operation.file
+            to_path_value = operation.to_path
+
+            if not from_path or not to_path_value:
+                raise ValueError("move 操作缺少路徑資訊")
+
+            source = CodeProcessor._resolve_operation_path(base_dir, from_path)
+            target = CodeProcessor._resolve_operation_path(base_dir, to_path_value)
+
+            if not source.exists():
+                raise FileNotFoundError(f"要搬移的檔案不存在: {from_path}")
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+
+            return {
+                'op': op_type,
+                'file': from_path,
+                'status': 'moved',
+                'from_path': str(source),
+                'to_path': str(target)
+            }
+
+        raise ValueError(f"不支援的檔案操作類型: {op_type}")
+
+    @staticmethod
+    def _resolve_operation_path(base_dir: Path, relative_path: str) -> Path:
+        if not relative_path:
+            raise ValueError("未提供檔案路徑")
+
+        candidate = (base_dir / relative_path).resolve()
+        if base_dir not in candidate.parents and candidate != base_dir:
+            raise ValueError(f"檔案路徑超出專案目錄: {relative_path}")
+        return candidate
+
+    @staticmethod
+    def _perform_search_replace(content: str, search: str, replace: str, preserve_indentation: bool) -> str:
+        if search == "":
+            raise ValueError("search_replace 操作的 search 內容不可為空")
+
+        if search in content:
+            return content.replace(search, replace, 1)
+
+        lines = content.split('\n')
+        search_lines = search.split('\n')
+        index = CodeProcessor._find_sequence(lines, search_lines, allow_trim=False)
+        trimmed_match = False
+
+        if index is None:
+            index = CodeProcessor._find_sequence(lines, search_lines, allow_trim=True)
+            trimmed_match = index is not None
+
+        if index is None:
+            raise ValueError("找不到要替換的程式碼區塊")
+
+        replace_lines = replace.split('\n')
+
+        if trimmed_match and preserve_indentation and search_lines:
+            indent_source = lines[index] if index < len(lines) else ''
+            indent_match = re.match(r'^\s*', indent_source)
+            indent = indent_match.group(0) if indent_match else ''
+            replace_lines = CodeProcessor._apply_indent(replace_lines, indent)
+
+        new_lines = lines[:index] + replace_lines + lines[index + len(search_lines):]
+        result = '\n'.join(new_lines)
+
+        if content.endswith('\n') and not result.endswith('\n'):
+            result += '\n'
+
+        return result
+
+    @staticmethod
+    def _apply_edit_lines(content: str, operation: FileEditOperation) -> str:
+        start_line = int(operation.start_line)
+        end_line = int(operation.end_line)
+
+        if end_line < start_line:
+            raise ValueError("edit_lines 的 end_line 需大於等於 start_line")
+
+        lines = content.split('\n')
+        start_index = max(start_line - 1, 0)
+        end_index = min(len(lines), end_line)
+
+        existing_block = lines[start_index:end_index]
+        if operation.old_content is not None:
+            expected_lines = operation.old_content.split('\n')
+            if existing_block != expected_lines:
+                trimmed_existing = [line.strip() for line in existing_block]
+                trimmed_expected = [line.strip() for line in expected_lines]
+                if trimmed_existing != trimmed_expected:
+                    raise ValueError("edit_lines 的 old_content 與實際內容不符")
+
+        new_block = operation.new_content.split('\n') if operation.new_content else []
+        new_lines = lines[:start_index] + new_block + lines[end_index:]
+        result = '\n'.join(new_lines)
+
+        if content.endswith('\n') and not result.endswith('\n'):
+            result += '\n'
+
+        return result
+
+    @staticmethod
+    def _apply_unified_diff(content: str, hunk: Dict[str, Any]) -> str:
+        lines = content.split('\n')
+        context_before = hunk.get('context_before') or []
+        removed = hunk.get('removed') or []
+        added = hunk.get('added') or []
+        context_after = hunk.get('context_after') or []
+
+        pattern = context_before + removed + context_after
+        index = CodeProcessor._find_sequence(lines, pattern, allow_trim=False)
+        trimmed_match = False
+
+        if index is None:
+            partial_pattern = context_before + removed
+            index = CodeProcessor._find_sequence(lines, partial_pattern, allow_trim=True)
+            trimmed_match = index is not None
+
+        if index is None:
+            raise ValueError("找不到 unified diff 對應的內容區塊")
+
+        replace_start = index + len(context_before)
+        replace_end = replace_start + len(removed)
+
+        if context_after and not trimmed_match:
+            after_segment = lines[replace_end:replace_end + len(context_after)]
+            if after_segment != context_after:
+                raise ValueError("unified diff 的後文無法匹配")
+
+        new_lines = lines[:replace_start] + added + lines[replace_end:]
+        result = '\n'.join(new_lines)
+
+        if content.endswith('\n') and not result.endswith('\n'):
+            result += '\n'
+
+        return result
+
+    @staticmethod
+    def _find_sequence(lines: List[str], pattern: List[str], allow_trim: bool) -> Optional[int]:
+        if not pattern:
+            return 0
+
+        limit = len(lines) - len(pattern) + 1
+        if limit < 0:
+            return None
+
+        for index in range(limit):
+            segment = lines[index:index + len(pattern)]
+            if segment == pattern:
+                return index
+
+        if allow_trim:
+            trimmed_pattern = [line.strip() for line in pattern]
+            for index in range(limit):
+                segment = [line.strip() for line in lines[index:index + len(pattern)]]
+                if segment == trimmed_pattern:
+                    return index
+
+        return None
+
+    @staticmethod
+    def _apply_indent(lines: List[str], indent: str) -> List[str]:
+        if not indent:
+            return lines
+
+        adjusted = []
+        for line in lines:
+            if not line.strip():
+                adjusted.append(line)
+            elif line.startswith(indent):
+                adjusted.append(line)
+            else:
+                adjusted.append(indent + line.lstrip())
+
+        return adjusted
 
 # ============================================
 # 程式執行管理 - 改進版,增加Terminal輸出捕獲
@@ -2478,9 +2965,11 @@ class ProcessManager:
             
             # Step 5: 儲存專案檔案
             logger.info("Step 5: 儲存專案檔案...")
-            saved_files, updated_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
+            saved_files, updated_files, operations_applied, operations_failed = CodeProcessor.save_project_files(folder_path, project, is_iteration)
             result.files_created = saved_files
             result.files_updated = updated_files
+            result.operations_applied = operations_applied
+            result.operations_failed = operations_failed
             
             # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
@@ -2626,7 +3115,20 @@ class ProcessManager:
                 window_info = f" (視窗: {file.window_title})" if file.opens_window and file.window_title else ""
                 update_status = " [已更新]" if str(Path(final_project_dir) / file.filename) in updated_files else " [新建]"
                 result.output += f"{file_icon} {file.filename}{update_status} - {file.description or file.filetype}{window_info}\n"
-            
+
+            if operations_applied or operations_failed:
+                result.output += """
+=== 🧩 既有檔案操作 ===
+"""
+                for op_info in operations_applied:
+                    target = op_info.get('file') or op_info.get('to_path') or op_info.get('path') or '未指定'
+                    status = op_info.get('status', 'patched')
+                    result.output += f"• {target} → {status}\n"
+
+                for op_error in operations_failed:
+                    target = op_error.get('file') or '未指定'
+                    result.output += f"• ⚠️ {target} 失敗: {op_error.get('error')}\n"
+
             result.output += f"""
 === 💻 VS Code 狀態 ===
 {'✅ 已開啟' if vscode_result.get('success') else '⚠️ 開啟失敗'}
@@ -2814,11 +3316,14 @@ def load_project():
                 'main_file': None,
                 'setup_instructions': [],
                 'run_instructions': [],
-                'files': metadata_files
+                'files': metadata_files,
+                'operations': []
             }
         else:
             if not project_info.get('files'):
                 project_info['files'] = ProjectManager.build_file_metadata(project_dir)
+            if 'operations' not in project_info:
+                project_info['operations'] = []
 
         if conversation.project_name != project_info.get('project_name'):
             conversation.project_name = project_info.get('project_name', conversation.project_name)
@@ -3014,6 +3519,8 @@ def run_process():
             'output': result.output,
             'files_created': result.files_created,
             'files_updated': result.files_updated,
+            'operations_applied': result.operations_applied,
+            'operations_failed': result.operations_failed,
             'ai_response': result.ai_response or '無 AI 回應',
             'ai_response_json': result.ai_response_json,
             'installation_logs': result.installation_logs,
@@ -3035,7 +3542,8 @@ def run_process():
                 'description': result.project_data.description,
                 'files_count': len(result.project_data.files),
                 'main_file': result.project_data.main_file,
-                'has_gui': any(f.opens_window for f in result.project_data.files)
+                'has_gui': any(f.opens_window for f in result.project_data.files),
+                'operations_count': len(result.project_data.operations)
             }
             response_data['auto_attach_preview'] = [
                 {

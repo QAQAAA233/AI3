@@ -365,7 +365,11 @@ function toggleProjectPanel() {
 }
 
 function updateProjectPanelVisibility() {
-    const hasProject = document.getElementById('projectStructureSection')?.style.display !== 'none';
+    const structureSection = document.getElementById('projectStructureSection');
+    const operationsSection = document.getElementById('projectOperationsSection');
+    const hasStructure = structureSection ? structureSection.style.display !== 'none' : false;
+    const hasOperations = operationsSection ? operationsSection.style.display !== 'none' : false;
+    const hasProject = hasStructure || hasOperations;
     const hasAttached = uploadedFiles.length > 0 || autoAttachedFiles.length > 0;
     const emptyState = document.getElementById('panelEmptyState');
 
@@ -921,7 +925,7 @@ async function handleSubmit() {
                 currentProject = result.project;
                 if (result.ai_response_json) {
                     currentProject.json_data = result.ai_response_json;
-                    displayProjectStructure(result.ai_response_json.files);
+                    displayProjectStructure(result.ai_response_json);
                 }
 
                 if (Array.isArray(result.auto_attach_preview)) {
@@ -1409,12 +1413,13 @@ async function loadExistingProject(projectDir) {
                     project_name: result.project_info.project_name,
                     description: result.project_info.description,
                     files: result.project_info.files,
-                    main_file: result.project_info.main_file
+                    main_file: result.project_info.main_file,
+                    operations: result.project_info.operations || []
                 }
             };
 
             document.getElementById('currentProjectName').textContent = currentProject.name;
-            displayProjectStructure(result.project_info.files);
+            displayProjectStructure(currentProject.json_data);
             setAutoAttachedFiles(result.auto_attach_preview || []);
 
             upsertProjectListEntry({
@@ -1492,53 +1497,130 @@ async function loadExistingProject(projectDir) {
     }
 }
 
-function displayProjectStructure(files) {
+function displayProjectStructure(projectJson) {
     const section = document.getElementById('projectStructureSection');
     const filesList = document.getElementById('projectFilesList');
     const countBadge = document.getElementById('projectFilesCount');
-    
-    if (!section || !filesList || !countBadge) return;
-    
-    if (!files || files.length === 0) {
-        section.style.display = 'none';
-        updateProjectPanelVisibility();
+    const operationsSection = document.getElementById('projectOperationsSection');
+    const operationsList = document.getElementById('projectOperationsList');
+    const operationsCountBadge = document.getElementById('projectOperationsCount');
+
+    if (!section || !filesList || !countBadge || !operationsSection || !operationsList || !operationsCountBadge) {
         return;
     }
-    
-    section.style.display = 'block';
-    countBadge.textContent = files.length;
-    filesList.innerHTML = '';
-    
-    files.forEach(file => {
-        const fileItem = document.createElement('div');
-        fileItem.className = 'project-file-item';
-        
-        const badge = document.createElement('span');
-        badge.className = `file-type-badge ${file.filetype || 'text'}`;
-        badge.textContent = (file.filetype || 'TEXT').toUpperCase();
-        
-        const fileInfo = document.createElement('div');
-        fileInfo.style.flex = '1';
-        fileInfo.style.minWidth = '0';
-        
-        const fileName = document.createElement('div');
-        fileName.className = 'file-name-text';
-        fileName.textContent = file.filename;
-        
-        fileInfo.appendChild(fileName);
-        
-        if (file.description) {
-            const fileDesc = document.createElement('div');
-            fileDesc.className = 'file-desc-text';
-            fileDesc.textContent = file.description;
-            fileInfo.appendChild(fileDesc);
-        }
-        
-        fileItem.appendChild(badge);
-        fileItem.appendChild(fileInfo);
-        filesList.appendChild(fileItem);
-    });
-    
+
+    const files = Array.isArray(projectJson?.files) ? projectJson.files : [];
+    const operations = Array.isArray(projectJson?.operations) ? projectJson.operations : [];
+
+    if (files.length === 0) {
+        section.style.display = 'none';
+        filesList.innerHTML = '';
+    } else {
+        section.style.display = 'block';
+        countBadge.textContent = files.length;
+        filesList.innerHTML = '';
+
+        files.forEach(file => {
+            const fileItem = document.createElement('div');
+            fileItem.className = 'project-file-item';
+
+            const badge = document.createElement('span');
+            badge.className = `file-type-badge ${file.filetype || 'text'}`;
+            badge.textContent = (file.filetype || 'TEXT').toUpperCase();
+
+            const fileInfo = document.createElement('div');
+            fileInfo.style.flex = '1';
+            fileInfo.style.minWidth = '0';
+
+            const fileName = document.createElement('div');
+            fileName.className = 'file-name-text';
+            fileName.textContent = file.filename;
+
+            fileInfo.appendChild(fileName);
+
+            if (file.description) {
+                const fileDesc = document.createElement('div');
+                fileDesc.className = 'file-desc-text';
+                fileDesc.textContent = file.description;
+                fileInfo.appendChild(fileDesc);
+            }
+
+            fileItem.appendChild(badge);
+            fileItem.appendChild(fileInfo);
+            filesList.appendChild(fileItem);
+        });
+    }
+
+    if (operations.length === 0) {
+        operationsSection.style.display = 'none';
+        operationsList.innerHTML = '';
+    } else {
+        operationsSection.style.display = 'block';
+        operationsCountBadge.textContent = operations.length;
+        operationsList.innerHTML = '';
+
+        const operationLabels = {
+            search_replace: '搜尋/替換',
+            edit_lines: '行區段',
+            unified_diff: '差異補丁',
+            create: '建立',
+            delete: '刪除',
+            move: '搬移'
+        };
+
+        operations.forEach(op => {
+            const item = document.createElement('div');
+            item.className = 'project-file-item';
+
+            const badge = document.createElement('span');
+            badge.className = 'file-type-badge operation';
+            const opType = typeof op?.op === 'string' ? op.op : '';
+            badge.textContent = (operationLabels[opType] || opType || '操作').toUpperCase();
+
+            const info = document.createElement('div');
+            info.style.flex = '1';
+            info.style.minWidth = '0';
+
+            const name = document.createElement('div');
+            name.className = 'file-name-text';
+
+            const fromPath = op.from_path || op.from || '';
+            const toPath = op.to_path || op.to || '';
+            const baseFile = op.file || toPath || fromPath || op.path || '未指定檔案';
+
+            if (opType === 'move') {
+                name.textContent = `${fromPath || '未指定'} → ${toPath || '未指定'}`;
+            } else {
+                name.textContent = baseFile;
+            }
+
+            info.appendChild(name);
+
+            const details = [];
+            if (op.description) {
+                details.push(op.description);
+            }
+            if (typeof op.start_line === 'number' && typeof op.end_line === 'number') {
+                details.push(`行 ${op.start_line}-${op.end_line}`);
+            } else if (op.hunk && (Array.isArray(op.hunk.removed) || Array.isArray(op.hunk.added))) {
+                const removedCount = Array.isArray(op.hunk.removed) ? op.hunk.removed.length : 0;
+                const addedCount = Array.isArray(op.hunk.added) ? op.hunk.added.length : 0;
+                details.push(`Δ -${removedCount} +${addedCount}`);
+            }
+
+            if (details.length > 0) {
+                const desc = document.createElement('div');
+                desc.className = 'file-desc-text';
+                desc.textContent = details.join(' ・ ');
+                info.appendChild(desc);
+            }
+
+            item.appendChild(badge);
+            item.appendChild(info);
+            operationsList.appendChild(item);
+        });
+    }
+
     updateProjectPanelVisibility();
 }
 

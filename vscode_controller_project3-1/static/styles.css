@@ -620,6 +620,10 @@ body {
     color: white;
 }
 
+.file-type-badge.operation {
+    background: #f97316;
+}
+
 .file-name-text,
 .attached-file-name {
     flex: 1;
