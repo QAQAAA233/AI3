@@ -1533,16 +1533,9 @@ function displayProjectStructure(files) {
             fileDesc.textContent = file.description;
             fileInfo.appendChild(fileDesc);
         }
-
+        
         fileItem.appendChild(badge);
         fileItem.appendChild(fileInfo);
-        if (file.apply_mode && typeof file.apply_mode === 'string' && file.apply_mode.toLowerCase() === 'patch') {
-            const operationTag = document.createElement('span');
-            operationTag.className = 'file-operation-tag patch';
-            operationTag.textContent = 'PATCH';
-            operationTag.title = '此檔案將以 Git-like 補丁套用到既有檔案';
-            fileItem.appendChild(operationTag);
-        }
         filesList.appendChild(fileItem);
     });
     
