@@ -2157,6 +2157,7 @@ class ProgramManager:
     @classmethod
     def get_terminal_output(cls, pid: int) -> str:
         """獲取指定程序的Terminal輸出"""
+        cls.update_outputs()
         if pid in cls.running_programs:
             return '\n'.join(cls.running_programs[pid]['terminal_output'])
         return ""
@@ -2164,6 +2165,7 @@ class ProgramManager:
     @classmethod
     def get_all_terminal_output(cls) -> str:
         """獲取所有運行程序的Terminal輸出"""
+        cls.update_outputs()
         all_output = []
         for pid, info in cls.running_programs.items():
             if info['terminal_output']:

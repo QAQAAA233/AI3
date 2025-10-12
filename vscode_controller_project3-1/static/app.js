@@ -526,6 +526,42 @@ function applyDiagnosticsToMessage(messageElement, report = []) {
     holder.style.display = 'block';
 }
 
+function applyTerminalOutputToMessage(messageElement, terminalOutput) {
+    if (!messageElement) return;
+
+    const hasOutput = typeof terminalOutput === 'string' && terminalOutput.trim() !== '';
+    let terminalSection = messageElement.querySelector('.terminal-output-section');
+
+    if (!hasOutput) {
+        if (terminalSection) {
+            terminalSection.remove();
+        }
+        return;
+    }
+
+    if (!terminalSection) {
+        terminalSection = document.createElement('div');
+        terminalSection.className = 'terminal-output-section';
+
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-header';
+        const terminalTitle = document.createElement('span');
+        terminalTitle.className = 'terminal-title';
+        terminalTitle.textContent = 'Terminal 輸出';
+        terminalHeader.appendChild(terminalTitle);
+
+        const terminalBody = document.createElement('div');
+        terminalBody.className = 'terminal-body selectable';
+        terminalSection.append(terminalHeader, terminalBody);
+        messageElement.appendChild(terminalSection);
+    }
+
+    const terminalBody = terminalSection.querySelector('.terminal-body');
+    if (terminalBody) {
+        terminalBody.textContent = terminalOutput;
+    }
+}
+
 function getCurrentMemoryState() {
     if (!currentProjectDir) return null;
     return projectMemoryState[currentProjectDir] || null;
@@ -901,10 +937,12 @@ async function handleSubmit() {
             } else if (attachDiagnostics) {
                 applyDiagnosticsToMessage(userMessage, []);
             }
+
+            applyTerminalOutputToMessage(userMessage, result.terminal_output);
         }
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, [], {
+            addMessage('assistant', result.output, result.usage_metadata, null, [], {
                 evaluation: result.evaluation_snapshot,
                 memory: result.memory_snapshot
             });
@@ -1100,24 +1138,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
         applyDiagnosticsToMessage(message, metadata.diagnosticsReport);
     }
 
-    if (terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-
-        const terminalHeader = document.createElement('div');
-        terminalHeader.className = 'terminal-header';
-        const terminalTitle = document.createElement('span');
-        terminalTitle.className = 'terminal-title';
-        terminalTitle.textContent = 'Terminal 輸出';
-        terminalHeader.appendChild(terminalTitle);
-
-        const terminalBody = document.createElement('div');
-        terminalBody.className = 'terminal-body selectable';
-        terminalBody.textContent = terminalOutput;
-
-        terminalSection.append(terminalHeader, terminalBody);
-        message.appendChild(terminalSection);
-    }
+    applyTerminalOutputToMessage(message, terminalOutput);
 
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
