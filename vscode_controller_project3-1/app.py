@@ -111,7 +111,7 @@ class FileOutput:
     """單個檔案輸出結構"""
     filename: str
     filetype: str
-    code: str
+    code: Optional[str] = None
     opens_window: bool = False
     window_title: Optional[str] = None
     install_requirements: Optional[List[str]] = None
@@ -123,6 +123,10 @@ class FileOutput:
     server_address: Optional[str] = None
     web_title: Optional[str] = None
     file_operation: Optional[str] = None
+    apply_mode: str = "replace"
+    patch_format: Optional[str] = None
+    patch: Optional[str] = None
+    patches: Optional[List[Dict[str, Any]]] = None
 
 @dataclass
 class ProjectOutput:
@@ -306,7 +310,7 @@ def get_json_schema():
                                     "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
                                     "description": "檔案語言/型別"
                                 },
-                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；嚴禁使用省略號。"},
+                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計、錯誤/例外處理與邊界；嚴禁使用省略號。(若為既有檔案的局部更新，可於套用補丁後提供最終完整內容)"},
                                 "opens_window": {"type": "boolean", "description": "是否會開啟原生視窗或GUI"},
                                 "window_title": {"type": ["string", "null"], "description": "視窗標題(若有視窗則填)"},
                                 "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝項(如 pip install package)；須與 dependencies 對齊。"},
@@ -316,9 +320,36 @@ def get_json_schema():
                                 "is_web_app": {"type": "boolean", "description": "是否為Web應用(HTTP伺服/前端)"},
                                 "can_open_standalone": {"type": "boolean", "description": "是否能自動開啟獨立瀏覽器視窗"},
                                 "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
-                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"}
+                                "web_title": {"type": ["string", "null"], "description": "網頁標題(若為Web)"},
+                                "apply_mode": {
+                                    "type": "string",
+                                    "enum": ["replace", "create", "patch"],
+                                    "description": "檔案寫入策略：replace(預設,覆蓋或建立新檔)、create(僅建立全新檔案)、patch(對已存在檔案套用 Git-like 補丁)"
+                                },
+                                "patch_format": {
+                                    "type": ["string", "null"],
+                                    "enum": ["unified_diff", "search_replace", "openai_patch", "null"],
+                                    "description": "apply_mode=patch 時指定補丁格式：統一差異(unified_diff)/Search-Replace/OPENAI Patch"},
+                                "patch": {
+                                    "type": ["string", "null"],
+                                    "description": "Git 風格補丁文字；包含 ---/+++ 標頭與 @@ chunk，僅限既有檔案。"
+                                },
+                                "patches": {
+                                    "type": ["array", "null"],
+                                    "description": "Search-Replace 補丁集合；適用於 apply_mode=patch 且 patch_format=search_replace。",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "op": {"type": "string", "enum": ["search_replace"], "description": "目前僅支援 search_replace"},
+                                            "search": {"type": "string", "description": "需完整匹配的原始片段(避免行號)"},
+                                            "replace": {"type": "string", "description": "替換後片段；請保持縮排與風格一致"},
+                                            "count": {"type": ["integer", "null"], "minimum": 1, "description": "(可選)替換次數，預設僅替換第一個匹配"}
+                                        },
+                                        "required": ["op", "search", "replace"]
+                                    }
+                                }
                             },
-                            "required": ["filename", "filetype", "code", "opens_window"]
+                            "required": ["filename", "filetype", "opens_window"]
                         }
                     }
                 },
@@ -362,7 +393,11 @@ JSON 結構必須包含以下欄位:
           {
               "filename":"檔名.副檔名",
               "filetype":"python/javascript/...",
-              "code":"完整可執行程式；繁中註解；不得省略",
+              "apply_mode":"replace"(預設)/"patch"(僅對已存在檔案做增量修改)/"create",
+              "patch_format":"unified_diff/search_replace/openai_patch"(apply_mode=patch 時必填),
+              "patch":"Git 補丁內容(含 ---/+++ 與 @@ chunk)"或
+              "patches":[{"op":"search_replace","search":"原碼","replace":"新碼"}],
+              "code":"完整可執行程式；繁中註解；不得省略；若為補丁操作可填入套用後最終內容",
               "opens_window":true/false,
               "window_title":null或字串,
               "install_requirements":["pip install ..."],
@@ -1703,10 +1738,37 @@ class CodeProcessor:
             project_section = json_data.get('專案輸出', json_data)
             files = []
             for file_data in project_section.get('files', []):
-                code = file_data.get('code', '')
+                raw_code = file_data.get('code')
+                code = normalize_code_content(raw_code) if isinstance(raw_code, str) else (raw_code if raw_code is None else str(raw_code))
 
-                if isinstance(code, str):
-                    code = normalize_code_content(code)
+                raw_apply_mode = file_data.get('apply_mode') or file_data.get('file_operation') or 'replace'
+                if isinstance(raw_apply_mode, str):
+                    apply_mode = raw_apply_mode.strip().lower()
+                else:
+                    apply_mode = 'replace'
+
+                patch_format = file_data.get('patch_format') or file_data.get('diff_format') or file_data.get('patch_type')
+                if isinstance(patch_format, str):
+                    patch_format = patch_format.strip().lower().replace('-', '_').replace(' ', '_')
+                patch_text = file_data.get('patch') or file_data.get('patch_content') or file_data.get('diff')
+                if isinstance(patch_text, str):
+                    patch_text = normalize_code_content(patch_text)
+
+                patches_data = file_data.get('patches') or file_data.get('operations')
+                normalized_patches = None
+                if isinstance(patches_data, list):
+                    normalized_patches = []
+                    for op in patches_data:
+                        if not isinstance(op, dict):
+                            continue
+                        normalized_op = dict(op)
+                        search_val = normalized_op.get('search')
+                        replace_val = normalized_op.get('replace')
+                        if isinstance(search_val, str):
+                            normalized_op['search'] = normalize_code_content(search_val)
+                        if isinstance(replace_val, str):
+                            normalized_op['replace'] = normalize_code_content(replace_val)
+                        normalized_patches.append(normalized_op)
 
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
@@ -1721,7 +1783,12 @@ class CodeProcessor:
                     is_web_app=file_data.get('is_web_app', False),
                     can_open_standalone=file_data.get('can_open_standalone', False),
                     server_address=file_data.get('server_address'),
-                    web_title=file_data.get('web_title')
+                    web_title=file_data.get('web_title'),
+                    file_operation=file_data.get('file_operation'),
+                    apply_mode=apply_mode,
+                    patch_format=patch_format,
+                    patch=patch_text,
+                    patches=normalized_patches
                 ))
 
             return ProjectOutput(
@@ -1736,7 +1803,174 @@ class CodeProcessor:
         except Exception as e:
             logger.error(f"解析 JSON 回應失敗: {e}")
             raise
-    
+
+    @staticmethod
+    def apply_patch_to_content(file: FileOutput, original_content: str) -> str:
+        """對既有檔案套用補丁內容"""
+
+        patch_format = (file.patch_format or 'unified_diff').lower()
+
+        if patch_format in {'unified_diff', 'git', 'git_diff', 'git_patch'}:
+            if not isinstance(file.patch, str) or not file.patch.strip():
+                raise ValueError("補丁內容為空，無法套用 unified diff。")
+            return CodeProcessor._apply_unified_diff_patch(original_content, file.patch)
+
+        if patch_format == 'openai_patch':
+            if not isinstance(file.patch, str) or not file.patch.strip():
+                raise ValueError("補丁內容為空，無法套用 openai_patch 格式。")
+            return CodeProcessor._apply_unified_diff_patch(original_content, file.patch)
+
+        if patch_format == 'search_replace':
+            if not file.patches:
+                raise ValueError("缺少 search_replace 補丁操作。")
+            return CodeProcessor._apply_search_replace_patches(original_content, file.patches)
+
+        raise ValueError(f"不支援的補丁格式: {patch_format}")
+
+    @staticmethod
+    def _apply_search_replace_patches(original_content: str, patches: List[Dict[str, Any]]) -> str:
+        """依序套用 Search/Replace 補丁操作"""
+
+        content = original_content
+
+        for idx, operation in enumerate(patches, start=1):
+            if not isinstance(operation, dict):
+                raise ValueError(f"第 {idx} 個補丁不是有效物件。")
+
+            op_type = operation.get('op', 'search_replace')
+            if op_type != 'search_replace':
+                raise ValueError(f"第 {idx} 個補丁不支援的操作類型: {op_type}")
+
+            search = operation.get('search')
+            replace = operation.get('replace', '')
+            count = operation.get('count')
+
+            if not isinstance(search, str) or not search:
+                raise ValueError(f"第 {idx} 個補丁缺少有效的 search 內容。")
+
+            if replace is None:
+                replace = ''
+            elif not isinstance(replace, str):
+                replace = str(replace)
+
+            occurrences = content.count(search)
+            if occurrences == 0:
+                raise ValueError(f"未在檔案中找到要替換的片段 (第 {idx} 個補丁)。")
+
+            if isinstance(count, int) and count > 0:
+                content = content.replace(search, replace, count)
+            else:
+                content = content.replace(search, replace, 1)
+
+        return content
+
+    @staticmethod
+    def _apply_unified_diff_patch(original_content: str, patch_text: str) -> str:
+        """套用 git unified diff 補丁"""
+
+        original_lines = original_content.splitlines(keepends=True)
+        result_segments: List[str] = []
+        orig_index = 0
+        diff_lines = patch_text.splitlines()
+        trim_final_newline = False
+
+        def append_until(target_index: int) -> None:
+            nonlocal orig_index
+            while orig_index < target_index and orig_index < len(original_lines):
+                result_segments.append(original_lines[orig_index])
+                orig_index += 1
+
+        header_prefixes = ('diff ', 'index ', '--- ', '+++ ', '*** ', 'rename ')
+        i = 0
+        while i < len(diff_lines):
+            line = diff_lines[i]
+
+            if not line:
+                i += 1
+                continue
+
+            if line.startswith(header_prefixes):
+                i += 1
+                continue
+
+            if line.startswith('@@'):
+                match = re.match(r'^@@\s+-([0-9]+)(?:,([0-9]+))?\s+\+([0-9]+)(?:,([0-9]+))?\s+@@', line)
+                if not match:
+                    raise ValueError(f"無法解析補丁區塊標頭: {line}")
+
+                old_start = int(match.group(1))
+                old_index = max(old_start - 1, 0)
+
+                if old_index < orig_index:
+                    # 重複或重疊區塊，直接使用當前位置
+                    old_index = orig_index
+
+                append_until(old_index)
+                i += 1
+
+                while i < len(diff_lines):
+                    hunk_line = diff_lines[i]
+                    if not hunk_line:
+                        i += 1
+                        continue
+
+                    if hunk_line.startswith(('@@', 'diff ', 'index ', '--- ', '+++ ', '*** ', 'rename ')):
+                        break
+
+                    if hunk_line.startswith(' '):
+                        text = hunk_line[1:]
+                        if orig_index >= len(original_lines):
+                            raise ValueError("補丁上下文超出原始檔案範圍。")
+                        original_line = original_lines[orig_index]
+                        if original_line.rstrip('\r\n') != text:
+                            raise ValueError("補丁上下文與原始檔案不相符。")
+                        result_segments.append(original_line)
+                        orig_index += 1
+                        i += 1
+                        continue
+
+                    if hunk_line.startswith('-'):
+                        text = hunk_line[1:]
+                        if orig_index >= len(original_lines):
+                            raise ValueError("補丁刪除段超出原始檔案範圍。")
+                        original_line = original_lines[orig_index]
+                        if original_line.rstrip('\r\n') != text:
+                            raise ValueError("補丁刪除內容與原始檔案不符。")
+                        orig_index += 1
+                        i += 1
+                        continue
+
+                    if hunk_line.startswith('+'):
+                        text = hunk_line[1:]
+                        result_segments.append(text + '\n')
+                        i += 1
+                        continue
+
+                    if hunk_line.startswith('\\'):
+                        if 'No newline at end of file' in hunk_line:
+                            if result_segments:
+                                result_segments[-1] = result_segments[-1].rstrip('\r\n')
+                            trim_final_newline = True
+                        i += 1
+                        continue
+
+                    raise ValueError(f"未知的補丁行格式: {hunk_line}")
+
+                continue
+
+            # 其他行忽略 (例如空白行)
+            i += 1
+
+        append_until(len(original_lines))
+
+        result = ''.join(result_segments)
+        if not trim_final_newline and original_content.endswith(('\n', '\r')) and not result.endswith(('\n', '\r')):
+            result += '\n'
+        if trim_final_newline:
+            result = result.rstrip('\r\n')
+
+        return result
+
     @staticmethod
     def install_packages(install_requirements: List[str]) -> List[str]:
         """安裝套件"""
@@ -1789,28 +2023,67 @@ class CodeProcessor:
         
         project_dir.mkdir(parents=True, exist_ok=True)
         
+        serialized_files: List[Dict[str, Any]] = []
+
         for file in project.files:
             filepath = project_dir / file.filename
-            
+
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
+
+            apply_mode = (file.apply_mode or 'replace').lower()
+
             try:
-                file_exists = filepath.exists()
-                
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(file.code)
-                
-                if file_exists:
-                    logger.info(f"已更新檔案: {filepath}")
+                if apply_mode == 'patch':
+                    if not filepath.exists():
+                        raise FileNotFoundError(f"補丁應用失敗：檔案不存在 {filepath}")
+
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        original_content = f.read()
+
+                    patched_content = CodeProcessor.apply_patch_to_content(file, original_content)
+
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(patched_content)
+
+                    logger.info(f"已套用補丁更新檔案: {filepath}")
                     updated_files.append(str(filepath))
+                    file.code = patched_content
+
                 else:
-                    logger.info(f"已建立檔案: {filepath}")
-                    saved_files.append(str(filepath))
-                
-            except IOError as e:
+                    code_to_write = file.code
+                    if code_to_write is None:
+                        raise ValueError(f"檔案 {file.filename} 缺少 code 欄位，無法寫入。")
+                    if not isinstance(code_to_write, str):
+                        code_to_write = str(code_to_write)
+
+                    file_exists = filepath.exists()
+                    if apply_mode == 'create' and file_exists:
+                        logger.warning(f"apply_mode=create 但檔案已存在，將覆寫: {filepath}")
+
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(code_to_write)
+
+                    if file_exists:
+                        logger.info(f"已更新檔案: {filepath}")
+                        updated_files.append(str(filepath))
+                    else:
+                        logger.info(f"已建立檔案: {filepath}")
+                        saved_files.append(str(filepath))
+
+                serialized_entry = asdict(file)
+                if apply_mode == 'patch':
+                    serialized_entry['code'] = file.code
+                    serialized_entry['apply_mode'] = 'replace'
+                    serialized_entry.pop('patch', None)
+                    serialized_entry.pop('patch_format', None)
+                    serialized_entry.pop('patches', None)
+
+                serialized_files.append(serialized_entry)
+
+            except Exception as e:
                 logger.error(f"儲存檔案失敗 {filepath}: {e}")
                 raise
-        
+
         info_file = project_dir / "PROJECT_INFO.json"
         with open(info_file, 'w', encoding='utf-8') as f:
             json.dump({
@@ -1819,11 +2092,12 @@ class CodeProcessor:
                 "main_file": project.main_file,
                 "setup_instructions": project.setup_instructions,
                 "run_instructions": project.run_instructions,
-                "files": [asdict(file) for file in project.files]
+                "files": serialized_files
             }, f, indent=2, ensure_ascii=False)
-        
-        if info_file not in saved_files and info_file not in updated_files:
-            saved_files.append(str(info_file))
+
+        info_file_str = str(info_file)
+        if info_file_str not in saved_files and info_file_str not in updated_files:
+            saved_files.append(info_file_str)
         
         return saved_files, updated_files
 

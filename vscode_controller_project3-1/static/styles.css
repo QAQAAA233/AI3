@@ -620,6 +620,26 @@ body {
     color: white;
 }
 
+.file-operation-tag {
+    margin-left: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border: 1px solid var(--border-light);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    align-self: flex-start;
+}
+
+.file-operation-tag.patch {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.45);
+    color: #b45309;
+}
+
 .file-name-text,
 .attached-file-name {
     flex: 1;
@@ -927,12 +947,11 @@ body {
     right: 24px;
     top: 140px;
     /* 計算最大高度：視窗高度 - top 位置 - 底部間距 */
-    max-height: calc(100vh - 160px);
+    max-height: calc(100vh - 280px);
     overflow: hidden;
     transition: box-shadow 0.2s ease, border-color 0.2s ease, width 0.3s ease, min-width 0.3s ease;
     flex-shrink: 0;
-    /* 確保不被專案面板遮擋 */
-    z-index: 600;
+
 }
 
 .memory-panel.collapsed {
