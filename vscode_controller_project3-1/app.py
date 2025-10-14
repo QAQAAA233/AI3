@@ -1835,7 +1835,7 @@ class ProgramManager:
     """管理執行中的程式 - 增強版"""
     
     running_programs = {}
-    browser_processes = {}  # 新增:追蹤瀏覽器進程
+    browser_processes = {}  # 新增:追蹤瀏覽器進程及視窗資訊
     
     @classmethod
     def add_program(cls, process, filename, folder_path, window_title=None, output_queue=None):
@@ -1853,32 +1853,63 @@ class ProgramManager:
         logger.info(f"已添加程式到管理列表: PID {process.pid}, 檔案 {filename}")
     
     @classmethod
-    def add_browser_process(cls, process, project_dir: str):
+    def add_browser_process(cls, process, project_dir: str, title: Optional[str] = None):
         """添加瀏覽器進程到追蹤"""
+        pid = getattr(process, 'pid', None)
         cls.browser_processes[project_dir] = {
             'process': process,
-            'pid': process.pid,
+            'pid': pid,
+            'title': title,
             'start_time': datetime.now()
         }
-        logger.info(f"已追蹤瀏覽器進程: PID {process.pid} for {project_dir}")
+        if pid:
+            logger.info(f"已追蹤瀏覽器進程: PID {pid} for {project_dir}")
+        else:
+            logger.info(f"已追蹤瀏覽器視窗: {title or '未命名'} for {project_dir}")
     
     @classmethod
-    def close_project_browsers(cls, project_dir: str):
+    def close_project_browsers(cls, project_dir: str, title: Optional[str] = None):
         """關閉專案相關的瀏覽器視窗"""
-        if project_dir in cls.browser_processes:
-            browser_info = cls.browser_processes[project_dir]
+        tracked_info = cls.browser_processes.get(project_dir)
+        target_titles: List[str] = []
+
+        if tracked_info:
+            stored_title = tracked_info.get('title')
+            if stored_title:
+                target_titles.append(stored_title)
+
+            process = tracked_info.get('process')
             try:
-                process = browser_info['process']
-                if process.poll() is None:  # 進程還在運行
+                if process and process.poll() is None:  # 進程還在運行
                     process.terminate()
                     time.sleep(0.3)
                     if process.poll() is None:
                         process.kill()
-                logger.info(f"已關閉舊瀏覽器: PID {browser_info['pid']}")
+                    logger.info(f"已關閉舊瀏覽器: PID {tracked_info.get('pid')}")
             except Exception as e:
-                logger.warning(f"關閉瀏覽器失敗: {e}")
+                logger.warning(f"關閉瀏覽器進程失敗: {e}")
             finally:
-                del cls.browser_processes[project_dir]
+                cls.browser_processes.pop(project_dir, None)
+
+        if title:
+            target_titles.append(title)
+
+        if target_titles:
+            try:
+                lower_targets = [t.lower() for t in target_titles if t]
+                if lower_targets:
+                    for window in pwc.getAllWindows():
+                        window_title = window.title or ''
+                        lower_title = window_title.lower()
+                        if any(t in lower_title for t in lower_targets):
+                            try:
+                                window.close()
+                                logger.info(f"已關閉殘留瀏覽器視窗: {window_title}")
+                                time.sleep(0.1)
+                            except Exception as e:
+                                logger.warning(f"關閉視窗 '{window_title}' 失敗: {e}")
+            except Exception as e:
+                logger.debug(f"搜尋並關閉瀏覽器視窗時發生問題: {e}")
     
     @classmethod
     def get_terminal_output(cls, pid: int) -> str:
@@ -1886,6 +1917,28 @@ class ProgramManager:
         if pid in cls.running_programs:
             return '\n'.join(cls.running_programs[pid]['terminal_output'])
         return ""
+
+    @staticmethod
+    def _wait_for_window(title: Optional[str], timeout: float = 6.0) -> bool:
+        """等待指定標題的視窗出現"""
+        if not title:
+            return False
+
+        end_time = time.time() + timeout
+        lowered_title = title.lower()
+
+        while time.time() < end_time:
+            try:
+                for window in pwc.getAllWindows():
+                    if not window.title:
+                        continue
+                    if lowered_title in window.title.lower():
+                        return True
+            except Exception:
+                break
+            time.sleep(0.3)
+
+        return False
     
     @classmethod
     def get_all_terminal_output(cls) -> str:
@@ -2117,12 +2170,14 @@ class ProgramManager:
     @classmethod
     def open_standalone_browser(cls, url: str, title: str = "Web App", project_dir: str = None):
         """開啟獨立的瀏覽器視窗 - 增強錯誤處理版本"""
+        window_title = title or "Web App"
+
         if project_dir:
-            cls.close_project_browsers(project_dir)
-        
+            cls.close_project_browsers(project_dir, window_title)
+
         browser_process = None
         browser_opened = False
-        
+
         try:
             if platform.system() == 'Windows':
                 # Windows 平台
@@ -2162,15 +2217,27 @@ class ProgramManager:
                             time.sleep(1)
                             if browser_process.poll() is None:
                                 logger.info(f"✅ Chrome 成功啟動，PID: {browser_process.pid}")
-                                browser_opened = True
-                                break
                             else:
                                 logger.warning(f"Chrome 進程立即退出，返回碼: {browser_process.poll()}")
-                                browser_process = None
+
+                            if cls._wait_for_window(window_title):
+                                browser_opened = True
+                                break
+
+                            logger.warning(f"未在 Chrome 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
+                            if browser_process and browser_process.poll() is None:
+                                try:
+                                    browser_process.terminate()
+                                    time.sleep(0.2)
+                                    if browser_process.poll() is None:
+                                        browser_process.kill()
+                                except Exception as close_err:
+                                    logger.debug(f"結束 Chrome 進程失敗: {close_err}")
+                            browser_process = None
                         except Exception as e:
                             logger.error(f"啟動 Chrome 失敗: {e}")
                             browser_process = None
-                
+
                 # 嘗試 Edge
                 if not browser_opened:
                     for edge_path in edge_paths:
@@ -2188,26 +2255,38 @@ class ProgramManager:
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE
                                 )
-                                
+
                                 time.sleep(1)
                                 if browser_process.poll() is None:
                                     logger.info(f"✅ Edge 成功啟動，PID: {browser_process.pid}")
-                                    browser_opened = True
-                                    break
                                 else:
                                     logger.warning(f"Edge 進程立即退出")
-                                    browser_process = None
+
+                                if cls._wait_for_window(window_title):
+                                    browser_opened = True
+                                    break
+
+                                logger.warning(f"未在 Edge 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
+                                if browser_process and browser_process.poll() is None:
+                                    try:
+                                        browser_process.terminate()
+                                        time.sleep(0.2)
+                                        if browser_process.poll() is None:
+                                            browser_process.kill()
+                                    except Exception as close_err:
+                                        logger.debug(f"結束 Edge 進程失敗: {close_err}")
+                                browser_process = None
                             except Exception as e:
                                 logger.error(f"啟動 Edge 失敗: {e}")
                                 browser_process = None
-                
+
                 # 🔧 修復：使用默認瀏覽器作為備用方案
                 if not browser_opened:
                     logger.warning("未找到 Chrome 或 Edge，使用默認瀏覽器")
                     import webbrowser
                     webbrowser.open_new(url)
-                    browser_opened = True
-                    
+                    browser_opened = cls._wait_for_window(window_title)
+
             elif platform.system() == 'Darwin':
                 # macOS 平台
                 chrome_app = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -2220,12 +2299,12 @@ class ProgramManager:
                         f'--user-data-dir={CONFIG_DIR / "chrome_profile"}'
                     ])
                     logger.info(f"✅ macOS Chrome 啟動")
-                    browser_opened = True
+                    browser_opened = cls._wait_for_window(window_title)
                 else:
                     subprocess.Popen(['open', '-n', '-a', 'Safari', url])
                     logger.info(f"✅ macOS Safari 啟動")
-                    browser_opened = True
-                    
+                    browser_opened = cls._wait_for_window(window_title)
+
             else:
                 # Linux 平台
                 browsers = [
@@ -2251,23 +2330,36 @@ class ProgramManager:
                                 ])
                             else:
                                 browser_process = subprocess.Popen([browser_cmd, url])
-                            
+
                             logger.info(f"✅ {browser_name} 啟動")
-                            browser_opened = True
-                            break
+                            if cls._wait_for_window(window_title):
+                                browser_opened = True
+                                break
+
+                            logger.warning(f"未在 {browser_name} 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
+                            if browser_process and browser_process.poll() is None:
+                                try:
+                                    browser_process.terminate()
+                                    time.sleep(0.2)
+                                    if browser_process.poll() is None:
+                                        browser_process.kill()
+                                except Exception as close_err:
+                                    logger.debug(f"結束 {browser_name} 進程失敗: {close_err}")
+                            browser_process = None
                     except Exception as e:
                         logger.warning(f"無法啟動 {browser_name}: {e}")
                         continue
-                
+
                 if not browser_opened:
                     import webbrowser
                     webbrowser.open_new(url)
-                    browser_opened = True
-            
+                    browser_opened = cls._wait_for_window(window_title)
+
             # 追蹤瀏覽器進程
-            if browser_process and project_dir:
-                cls.add_browser_process(browser_process, project_dir)
-            
+            if project_dir and browser_opened:
+                tracked_process = browser_process if browser_process and browser_process.poll() is None else None
+                cls.add_browser_process(tracked_process, project_dir, window_title)
+
             # 🔧 修復：返回狀態
             if not browser_opened:
                 logger.error("❌ 所有瀏覽器啟動方式都失敗")
