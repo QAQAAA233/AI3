@@ -1853,14 +1853,15 @@ class ProgramManager:
         logger.info(f"已添加程式到管理列表: PID {process.pid}, 檔案 {filename}")
     
     @classmethod
-    def add_browser_process(cls, process, project_dir: str, title: Optional[str] = None):
+    def add_browser_process(cls, process, project_dir: str, title: Optional[str] = None, managed_process: bool = True):
         """添加瀏覽器進程到追蹤"""
         pid = getattr(process, 'pid', None)
         cls.browser_processes[project_dir] = {
             'process': process,
             'pid': pid,
             'title': title,
-            'start_time': datetime.now()
+            'start_time': datetime.now(),
+            'managed_process': managed_process
         }
         if pid:
             logger.info(f"已追蹤瀏覽器進程: PID {pid} for {project_dir}")
@@ -1872,11 +1873,18 @@ class ProgramManager:
         """關閉專案相關的瀏覽器視窗"""
         tracked_info = cls.browser_processes.get(project_dir)
         target_titles: List[str] = []
+        managed_process = True
 
         if tracked_info:
             stored_title = tracked_info.get('title')
             if stored_title:
                 target_titles.append(stored_title)
+
+            managed_process = tracked_info.get('managed_process', True)
+
+            if not managed_process:
+                logger.info("瀏覽器使用共用視窗，跳過自動關閉")
+                return
 
             process = tracked_info.get('process')
             try:
@@ -1894,7 +1902,7 @@ class ProgramManager:
         if title:
             target_titles.append(title)
 
-        if target_titles:
+        if managed_process and target_titles:
             try:
                 lower_targets = [t.lower() for t in target_titles if t]
                 if lower_targets:
@@ -1937,6 +1945,31 @@ class ProgramManager:
             except Exception:
                 break
             time.sleep(0.3)
+
+        return False
+
+    @staticmethod
+    def _focus_existing_window(title: Optional[str]) -> bool:
+        """嘗試將已存在的視窗帶到前景"""
+        if not title:
+            return False
+
+        lowered_title = title.lower()
+
+        try:
+            for window in pwc.getAllWindows():
+                window_title = window.title or ''
+                if lowered_title in window_title.lower():
+                    try:
+                        if window.isMinimized:
+                            window.restore()
+                        window.activate()
+                        logger.info(f"已聚焦既有瀏覽器視窗: {window_title}")
+                        return True
+                    except Exception as focus_err:
+                        logger.debug(f"聚焦視窗 '{window_title}' 失敗: {focus_err}")
+        except Exception as e:
+            logger.debug(f"搜尋既有視窗時出現問題: {e}")
 
         return False
     
@@ -2169,16 +2202,43 @@ class ProgramManager:
     
     @classmethod
     def open_standalone_browser(cls, url: str, title: str = "Web App", project_dir: str = None):
-        """開啟獨立的瀏覽器視窗 - 增強錯誤處理版本"""
+        """開啟瀏覽器視窗或分頁 - 增強錯誤處理版本"""
         window_title = title or "Web App"
 
-        if project_dir:
+        if cls._focus_existing_window(window_title):
+            if project_dir:
+                cls.add_browser_process(None, project_dir, window_title, managed_process=False)
+            return None
+
+        tracked_info = cls.browser_processes.get(project_dir) if project_dir else None
+        should_close_managed = True
+
+        if tracked_info and not tracked_info.get('managed_process', True):
+            should_close_managed = False
+
+        if project_dir and should_close_managed:
             cls.close_project_browsers(project_dir, window_title)
 
         browser_process = None
         browser_opened = False
+        managed_process = True
 
         try:
+            try:
+                import webbrowser
+                logger.info("嘗試在現有瀏覽器中開啟 URL")
+                webbrowser.open(url, new=0, autoraise=True)
+                if cls._wait_for_window(window_title):
+                    browser_opened = True
+                    managed_process = False
+            except Exception as e:
+                logger.warning(f"使用 webbrowser 模組開啟失敗: {e}")
+
+            if browser_opened:
+                if project_dir:
+                    cls.add_browser_process(None, project_dir, window_title, managed_process=False)
+                return None
+
             if platform.system() == 'Windows':
                 # Windows 平台
                 chrome_paths = [
@@ -2203,11 +2263,9 @@ class ProgramManager:
                             # 🔧 修復：添加 creationflags 避免 CMD 視窗
                             browser_process = subprocess.Popen([
                                 chrome_path,
-                                '--new-window',
-                                f'--app={url}',
-                                '--window-size=1200,800',
-                                f'--user-data-dir={CONFIG_DIR / "chrome_profile"}',
-                            ], 
+                                '--new-tab',
+                                url
+                            ],
                             creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE
@@ -2222,6 +2280,7 @@ class ProgramManager:
 
                             if cls._wait_for_window(window_title):
                                 browser_opened = True
+                                managed_process = False
                                 break
 
                             logger.warning(f"未在 Chrome 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
@@ -2246,10 +2305,8 @@ class ProgramManager:
                             try:
                                 browser_process = subprocess.Popen([
                                     edge_path,
-                                    '--new-window',
-                                    f'--app={url}',
-                                    '--window-size=1200,800',
-                                    f'--user-data-dir={CONFIG_DIR / "edge_profile"}',
+                                    '--new-tab',
+                                    url
                                 ],
                                 creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0,
                                 stdout=subprocess.PIPE,
@@ -2264,6 +2321,7 @@ class ProgramManager:
 
                                 if cls._wait_for_window(window_title):
                                     browser_opened = True
+                                    managed_process = False
                                     break
 
                                 logger.warning(f"未在 Edge 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
@@ -2286,6 +2344,8 @@ class ProgramManager:
                     import webbrowser
                     webbrowser.open_new(url)
                     browser_opened = cls._wait_for_window(window_title)
+                    if browser_opened:
+                        managed_process = False
 
             elif platform.system() == 'Darwin':
                 # macOS 平台
@@ -2293,17 +2353,19 @@ class ProgramManager:
                 if os.path.exists(chrome_app):
                     browser_process = subprocess.Popen([
                         chrome_app,
-                        '--new-window',
-                        f'--app={url}',
-                        '--window-size=1200,800',
-                        f'--user-data-dir={CONFIG_DIR / "chrome_profile"}'
+                        '--new-tab',
+                        url
                     ])
                     logger.info(f"✅ macOS Chrome 啟動")
                     browser_opened = cls._wait_for_window(window_title)
+                    if browser_opened:
+                        managed_process = False
                 else:
-                    subprocess.Popen(['open', '-n', '-a', 'Safari', url])
+                    subprocess.Popen(['open', '-a', 'Safari', url])
                     logger.info(f"✅ macOS Safari 啟動")
                     browser_opened = cls._wait_for_window(window_title)
+                    if browser_opened:
+                        managed_process = False
 
             else:
                 # Linux 平台
@@ -2323,10 +2385,8 @@ class ProgramManager:
                             if 'chrome' in browser_cmd or 'chromium' in browser_cmd:
                                 browser_process = subprocess.Popen([
                                     browser_cmd,
-                                    '--new-window',
-                                    f'--app={url}',
-                                    '--window-size=1200,800',
-                                    f'--user-data-dir={CONFIG_DIR / "chrome_profile"}'
+                                    '--new-tab',
+                                    url
                                 ])
                             else:
                                 browser_process = subprocess.Popen([browser_cmd, url])
@@ -2334,6 +2394,7 @@ class ProgramManager:
                             logger.info(f"✅ {browser_name} 啟動")
                             if cls._wait_for_window(window_title):
                                 browser_opened = True
+                                managed_process = False
                                 break
 
                             logger.warning(f"未在 {browser_name} 視窗中找到標題 '{window_title}'，嘗試其他瀏覽器")
@@ -2354,11 +2415,15 @@ class ProgramManager:
                     import webbrowser
                     webbrowser.open_new(url)
                     browser_opened = cls._wait_for_window(window_title)
+                    if browser_opened:
+                        managed_process = False
 
             # 追蹤瀏覽器進程
             if project_dir and browser_opened:
-                tracked_process = browser_process if browser_process and browser_process.poll() is None else None
-                cls.add_browser_process(tracked_process, project_dir, window_title)
+                tracked_process = None
+                if managed_process and browser_process and browser_process.poll() is None:
+                    tracked_process = browser_process
+                cls.add_browser_process(tracked_process, project_dir, window_title, managed_process=managed_process)
 
             # 🔧 修復：返回狀態
             if not browser_opened:
