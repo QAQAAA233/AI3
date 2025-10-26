@@ -394,8 +394,9 @@ def get_json_schema():
                     },
                     "長期記憶新增": {
                         "type": "array",
-                        "description": "⭐本輪新增的重要發現、原則、限制或教訓（將累積到歷史長期記憶中）",
-                        "items": {"type": "string"}
+                        "description": "⭐本輪新增的重要發現、原則、限制或教訓（將累積到歷史長期記憶中）；每次回應【必須】至少新增 2 條以上",
+                        "items": {"type": "string"},
+                        "minItems": 2
                     },
                     "專案目標": {
                         "type": "array",
@@ -526,11 +527,15 @@ JSON 結構必須包含以下欄位：
    - 程式碼必須從實際的程式語句開始（如 Python 的 import，JavaScript 的 const 等）
    - 任何 # /path/to/file.py 或 // filename.js 這類註釋都是【嚴格禁止】的
    - 檔案名稱只能出現在 "filename" 欄位中
-4) 安全與隱私：禁止外露中間推理；僅呈現可驗證結論與程式；第三方素材須標明授權假設或以自製替代。
-5) 可執行性優先：`files[].code` 為可跑版本；避免除錯模式；Flask 以 `app.run(host='0.0.0.0', port=5100)`。
-6) 結構自檢：輸出前內隱檢核鍵/必填/enum/型別/可解析性/依賴一致/命令可跑。
-7) 使用者介面：若含UI，先內隱評估流程/回饋/響應式/可近用性；必要時加入狀態提示與錯誤訊息。
-8) ⭐ 長期記憶累積：在「長期記憶新增」中記錄本輪新發現的重要原則、限制或教訓，這些會累積到歷史記憶中。
+4) ⚠️ 程式執行模式：
+   - Flask/Django 等 Web 框架必須使用生產模式：`app.run(debug=False, use_reloader=False)`
+   - 避免使用 debug=True，以防止多進程衝突和安全問題
+   - 使用固定端口（如 5100），避免隨機端口
+5) 安全與隱私：禁止外露中間推理；僅呈現可驗證結論與程式；第三方素材須標明授權假設或以自製替代。
+6) 可執行性優先：`files[].code` 為可跑版本；避免除錯模式；Flask 以 `app.run(host='0.0.0.0', port=5100, debug=False, use_reloader=False)`。
+7) 結構自檢：輸出前內隱檢核鍵/必填/enum/型別/可解析性/依賴一致/命令可跑。
+8) 使用者介面：若含UI，先內隱評估流程/回饋/響應式/可近用性；必要時加入狀態提示與錯誤訊息。
+9) ⭐ 長期記憶累積：在「長期記憶新增」中記錄本輪新發現的重要原則、限制或教訓，這些會累積到歷史記憶中。
 """
 
     if normalized_mode == "creative":
@@ -1949,8 +1954,54 @@ class ProgramManager:
     browser_processes = {}
     
     @classmethod
-    def add_program(cls, process, filename, folder_path, window_title=None, output_queue=None):
-        """添加程式到管理列表"""
+    def _extract_port_from_address(cls, server_address: Optional[str]) -> Optional[int]:
+        """從伺服器地址中提取端口號"""
+        if not server_address:
+            return None
+        
+        try:
+            # 解析 http://localhost:5100 或 http://127.0.0.1:5100
+            import re
+            match = re.search(r':(\d+)', server_address)
+            if match:
+                return int(match.group(1))
+        except:
+            pass
+        
+        return None
+    
+    @classmethod
+    def _find_processes_using_port(cls, port: int) -> List[int]:
+        """找出使用指定端口的所有進程 PID"""
+        pids = []
+        
+        for pid, info in list(cls.running_programs.items()):
+            # 檢查是否有記錄的端口信息
+            if info.get('port') == port:
+                pids.append(pid)
+        
+        return pids
+    
+    @classmethod
+    def _close_port_processes(cls, port: int):
+        """關閉使用指定端口的所有進程"""
+        pids = cls._find_processes_using_port(port)
+        
+        if pids:
+            logger.info(f"⚠️ 檢測到端口 {port} 被 {len(pids)} 個進程佔用")
+            for pid in pids:
+                logger.info(f"正在關閉佔用端口 {port} 的進程 PID {pid}...")
+                cls.terminate_program(pid)
+                time.sleep(0.5)
+            
+            logger.info(f"✅ 已關閉所有佔用端口 {port} 的進程")
+            time.sleep(1)  # 等待端口釋放
+        else:
+            logger.info(f"✓ 端口 {port} 未被佔用")
+    
+    @classmethod
+    def add_program(cls, process, filename, folder_path, window_title=None, output_queue=None, port=None):
+        """添加程式到管理列表（新增端口參數）"""
         cls.running_programs[process.pid] = {
             'process': process,
             'filename': filename,
@@ -1959,9 +2010,14 @@ class ProgramManager:
             'start_time': datetime.now(),
             'pid': process.pid,
             'output_queue': output_queue,
-            'terminal_output': []
+            'terminal_output': [],
+            'port': port  # ⭐ 新增：記錄端口號
         }
-        logger.info(f"已添加程式到管理列表: PID {process.pid}")
+        if port:
+            logger.info(f"已添加程式到管理列表: PID {process.pid}, 使用端口 {port}")
+        else:
+            logger.info(f"已添加程式到管理列表: PID {process.pid}")
+    
     
     @classmethod
     def add_browser_process(cls, process, project_dir: str):
@@ -2086,9 +2142,40 @@ class ProgramManager:
     
     @classmethod
     def run_file(cls, filepath: str, folder_path: str, file_info: FileOutput = None):
-        """執行檔案"""
+        """執行檔案（改進版：啟動前自動關閉相同檔案和相同端口的進程）"""
         file_ext = Path(filepath).suffix.lower()
         window_title = file_info.window_title if file_info else None
+        filename = Path(filepath).name
+        
+        # ⭐ 提取端口號（如果是 Web 應用）
+        port = None
+        if file_info and file_info.is_web_app and file_info.server_address:
+            port = cls._extract_port_from_address(file_info.server_address)
+            if port:
+                logger.info(f"檢測到程式將使用端口: {port}")
+        
+        # ⭐ 步驟 1：關閉使用相同端口的所有進程（優先級最高）
+        if port:
+            logger.info(f"🔍 檢查端口 {port} 的使用狀況...")
+            cls._close_port_processes(port)
+        
+        # ⭐ 步驟 2：關閉相同檔案名稱的進程
+        logger.info(f"🔍 檢查是否有相同檔案 '{filename}' 正在運行...")
+        pids_to_close = []
+        for pid, info in list(cls.running_programs.items()):
+            if info['filename'] == filename and info['folder_path'] == folder_path:
+                pids_to_close.append(pid)
+                logger.info(f"發現相同檔案正在運行: PID {pid}")
+        
+        # 關閉所有相同檔案的進程
+        for pid in pids_to_close:
+            logger.info(f"正在關閉舊進程 PID {pid}...")
+            cls.terminate_program(pid)
+            time.sleep(0.5)  # 等待進程完全關閉
+        
+        if pids_to_close:
+            logger.info(f"✅ 已關閉 {len(pids_to_close)} 個舊進程")
+            time.sleep(1)  # 額外等待，確保資源釋放
         
         try:
             if file_info and file_info.is_web_app:
@@ -2119,17 +2206,17 @@ class ProgramManager:
                         time.sleep(2)
                         cls.open_standalone_browser(file_info.server_address, file_info.web_title or "Web App", folder_path)
                 
-                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue)
+                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue, port)  # ⭐ 傳遞端口
                 return process
             
             elif file_ext == '.py':
                 process, output_queue = cls._run_python(filepath, folder_path)
-                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue)
+                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue, port)  # ⭐ 傳遞端口
                 return process
             
             elif file_ext == '.js':
                 process, output_queue = cls._run_node(filepath, folder_path)
-                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue)
+                cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue, port)  # ⭐ 傳遞端口
                 return process
             
             elif file_ext == '.html':
@@ -2152,7 +2239,7 @@ class ProgramManager:
                 error_type="FILE_EXECUTION_ERROR",
                 error_message=str(e),
                 stack_trace=traceback.format_exc(),
-                context={'filepath': filepath, 'file_ext': file_ext}
+                context={'filepath': filepath, 'file_ext': file_ext, 'port': port}
             )
             
             raise
